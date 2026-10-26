@@ -1,0 +1,127 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  normalizeSubtitleText,
+  formatTimestampSRT,
+  formatTimestampVTT,
+  parseTimestampToSeconds,
+  findActiveCue,
+  auditSubtitleCues,
+  autoFixSubtitleMismatches,
+  exportToSRT,
+  parseSRT,
+  splitCueAtTime,
+  SubtitleCue,
+} from './subtitleEngine';
+
+test('normalizeSubtitleText normalizes Bangla Unicode NFC and cleans punctuation spacing', () => {
+  const messy = '  আজকের   ভিডিওতে আপনাদের স্বাগতম ।  ';
+  const clean = normalizeSubtitleText(messy);
+  assert.equal(clean, 'আজকের ভিডিওতে আপনাদের স্বাগতম।');
+});
+
+test('formatTimestampSRT and parseTimestampToSeconds roundtrip accurately', () => {
+  const formatted = formatTimestampSRT(65.42);
+  assert.equal(formatted, '00:01:05,420');
+  assert.equal(formatTimestampVTT(65.42), '00:01:05.420');
+  assert.equal(parseTimestampToSeconds(formatted), 65.42);
+  assert.equal(parseTimestampToSeconds('01:05.42'), 65.42);
+});
+
+test('findActiveCue returns matching cue at exact frame timestamp', () => {
+  const cues: SubtitleCue[] = [
+    {
+      id: 'c1',
+      startTime: 0.0,
+      endTime: 3.5,
+      textBn: 'প্রথম লাইন',
+      textEn: 'First line',
+    },
+    {
+      id: 'c2',
+      startTime: 3.6,
+      endTime: 7.0,
+      textBn: 'দ্বিতীয় লাইন',
+      textEn: 'Second line',
+    },
+  ];
+  assert.equal(findActiveCue(cues, 2.1)?.id, 'c1');
+  assert.equal(findActiveCue(cues, 3.55), null);
+  assert.equal(findActiveCue(cues, 5.0)?.id, 'c2');
+});
+
+test('auditSubtitleCues detects timing overlaps and autoFixSubtitleMismatches repairs them', () => {
+  const brokenCues: SubtitleCue[] = [
+    {
+      id: 'c1',
+      startTime: 0,
+      endTime: 4.5, // overlaps with c2 startTime 3.8
+      textBn: 'বাংলা সাবটাইটেল  এক ।',
+      textEn: 'Bangla subtitle one.',
+    },
+    {
+      id: 'c2',
+      startTime: 3.8,
+      endTime: 3.2, // inverted endTime < startTime
+      textBn: 'দ্বিতীয় সাবটাইটেল।',
+      textEn: 'Second subtitle.',
+    },
+  ];
+
+  const initialIssues = auditSubtitleCues(brokenCues, 'bilingual');
+  assert.ok(initialIssues.some((i) => i.type === 'overlap'));
+  assert.ok(initialIssues.some((i) => i.type === 'inverted_time'));
+  assert.ok(initialIssues.some((i) => i.type === 'encoding_mismatch'));
+
+  const { cues: fixedCues, fixedCount } = autoFixSubtitleMismatches(brokenCues);
+  assert.ok(fixedCount >= 3);
+
+  const postIssues = auditSubtitleCues(fixedCues, 'bilingual');
+  const postErrors = postIssues.filter((i) => i.severity === 'error');
+  assert.equal(postErrors.length, 0);
+  assert.ok(fixedCues[0].endTime < fixedCues[1].startTime);
+  assert.ok(fixedCues[1].endTime > fixedCues[1].startTime);
+  assert.equal(fixedCues[0].textBn, 'বাংলা সাবটাইটেল এক।');
+});
+
+test('exportToSRT and parseSRT preserve bilingual Bangla and English tracks', () => {
+  const cues: SubtitleCue[] = [
+    {
+      id: 'c1',
+      startTime: 1.0,
+      endTime: 4.0,
+      textBn: 'কৃত্রিম বুদ্ধিমত্তা আমাদের কাজের ধরণ বদলে দিচ্ছে।',
+      textEn: 'Artificial intelligence is transforming how we work.',
+    },
+  ];
+  const srt = exportToSRT(cues, 'bilingual', 'bn-top');
+  const parsed = parseSRT(srt);
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].startTime, 1.0);
+  assert.equal(parsed[0].endTime, 4.0);
+  assert.equal(
+    parsed[0].textBn,
+    'কৃত্রিম বুদ্ধিমত্তা আমাদের কাজের ধরণ বদলে দিচ্ছে।'
+  );
+  assert.equal(
+    parsed[0].textEn,
+    'Artificial intelligence is transforming how we work.'
+  );
+});
+
+test('splitCueAtTime splits cue into two sequential non-overlapping NFC cues', () => {
+  const cues: SubtitleCue[] = [
+    {
+      id: 'c1',
+      startTime: 0.0,
+      endTime: 4.0,
+      textBn: 'প্রথম অংশ দ্বিতীয় অংশ',
+      textEn: 'First part Second part',
+    },
+  ];
+  const split = splitCueAtTime(cues, 'c1', 2.0);
+  assert.equal(split.length, 2);
+  assert.ok(split[0].endTime < split[1].startTime);
+  assert.equal(split[0].textBn, 'প্রথম অংশ');
+  assert.equal(split[1].textBn, normalizeSubtitleText('দ্বিতীয় অংশ'));
+});

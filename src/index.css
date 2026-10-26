@@ -1,0 +1,59 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-display: 'Plus Jakarta Sans', 'Hind Siliguri', sans-serif;
+    --font-body: 'Plus Jakarta Sans', 'Hind Siliguri', sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+    --font-bangla-hind: 'Hind Siliguri', sans-serif;
+    --font-bangla-noto-sans: 'Noto Sans Bengali', sans-serif;
+    --font-bangla-noto-serif: 'Noto Serif Bengali', serif;
+    --font-bangla-baloo: 'Baloo Da 2', sans-serif;
+  }
+
+  body {
+    font-family: var(--font-body);
+    background-color: #0F172A;
+    color: #F8FAFC;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+    overflow-x: hidden;
+  }
+}
+
+.font-mono-tabular {
+  font-family: 'JetBrains Mono', monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.bangla-text-render {
+  line-height: 1.55;
+  letter-spacing: 0.01em;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+.subtitle-outline-strong {
+  text-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.95),
+    0 0 8px rgba(0, 0, 0, 0.75),
+    -1px -1px 0 rgba(0, 0, 0, 0.85),
+    1px -1px 0 rgba(0, 0, 0, 0.85),
+    -1px 1px 0 rgba(0, 0, 0, 0.85),
+    1px 1px 0 rgba(0, 0, 0, 0.85);
+}
+
+/* Custom subtle scrollbars for dense studio tables */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #0F172A;
+}
+::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
