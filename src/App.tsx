@@ -115,6 +115,7 @@ export default function App() {
     async (params: {
       mediaBase64?: string;
       mimeType?: string;
+      uploadedFileId?: string;
       dur: number;
       title: string;
       voiceSegments?: DetectedVoiceSegment[];
@@ -128,6 +129,7 @@ export default function App() {
           body: JSON.stringify({
             mediaBase64: params.mediaBase64,
             mimeType: params.mimeType,
+            uploadedFileId: params.uploadedFileId,
             duration: params.dur,
             videoTitle: params.title,
             voiceSegments: params.voiceSegments || [],
@@ -144,7 +146,7 @@ export default function App() {
         } else {
           showToast(
             data.error ||
-              'Video loaded — Edit subtitles below or use AI Auto-Subtitler'
+              'Video loaded — Edit subtitles below or use Voice Auto-Subtitler'
           );
         }
       } catch {
@@ -199,14 +201,36 @@ export default function App() {
           voiceSegments: voiceData.voiceSegments,
         });
       } catch {
-        // Fallback: send video file to server so FFmpeg extracts voice
+        // Fallback: stream video file to server so FFmpeg extracts 8kHz WAV voice track
+        try {
+          const ext = file.name.split('.').pop()?.toLowerCase() || 'mp4';
+          const upRes = await fetch('/api/video/upload-source', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/octet-stream',
+              'x-file-ext': ext,
+            },
+            body: file,
+          });
+          const upData = await upRes.json();
+          if (upRes.ok && upData.fileId) {
+            await runVoiceTranscription({
+              uploadedFileId: upData.fileId,
+              dur: duration,
+              title: file.name.replace(/\.[^/.]+$/, ''),
+            });
+            return;
+          }
+        } catch {
+          // ignore
+        }
         setIsExtractingVoice(false);
         showToast(
           `Loaded "${file.name}" — Click "Auto-Detect Voice Cues" to transcribe`
         );
       }
     },
-    [runVoiceTranscription, showToast]
+    [runVoiceTranscription, showToast, duration]
   );
 
   // Re-transcribe voice on demand

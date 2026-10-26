@@ -115,12 +115,25 @@ export const AiAutoSubtitleModal: React.FC<AiAutoSubtitleModalProps> = ({
       let mimeType: string | undefined = extractedWavBase64
         ? 'audio/wav'
         : undefined;
+      let uploadedFileId: string | undefined;
 
-      // If browser WebAudio didn't extract WAV, send video file for server-side FFmpeg voice extraction
-      if (!mediaBase64 && selectedFile && selectedFile.size <= 65 * 1024 * 1024) {
-        setStatusStep('Uploading video for server FFmpeg voice extraction...');
-        mediaBase64 = await fileToBase64(selectedFile);
-        mimeType = selectedFile.type || 'video/mp4';
+      // If browser WebAudio didn't extract WAV, stream the video file to server for FFmpeg voice extraction
+      if (!mediaBase64 && selectedFile) {
+        setStatusStep('Streaming video to server for FFmpeg voice extraction...');
+        const ext =
+          selectedFile.name.split('.').pop()?.toLowerCase() || 'mp4';
+        const upRes = await fetch('/api/video/upload-source', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/octet-stream',
+            'x-file-ext': ext,
+          },
+          body: selectedFile,
+        });
+        const upData = await upRes.json();
+        if (upRes.ok && upData.fileId) {
+          uploadedFileId = upData.fileId;
+        }
       }
 
       setStatusStep(
@@ -133,6 +146,7 @@ export const AiAutoSubtitleModal: React.FC<AiAutoSubtitleModalProps> = ({
         body: JSON.stringify({
           mediaBase64,
           mimeType,
+          uploadedFileId,
           duration: detectedDuration,
           videoTitle: videoTitle.trim() || 'Uploaded Video',
           spokenHints: spokenHints.trim(),

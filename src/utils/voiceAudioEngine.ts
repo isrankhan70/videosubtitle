@@ -233,16 +233,19 @@ export function uint8ArrayToBase64(bytes: Uint8Array): string {
  */
 export async function extractVoiceFromVideoFile(
   file: File,
-  maxDurationSec: number = 180
+  maxDurationSec: number = 240
 ): Promise<ExtractedVoiceResult> {
   const arrayBuffer = await file.arrayBuffer();
   const AudioCtx =
-    window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    window.AudioContext ||
+    (window as unknown as { webkitAudioContext: typeof AudioContext })
+      .webkitAudioContext;
   const audioCtx = new AudioCtx();
 
   try {
     const decoded = await audioCtx.decodeAudioData(arrayBuffer.slice(0));
-    const targetSampleRate = 16000;
+    // Use 8kHz wideband speech rate for videos > 90s so 4-minute audio stays under 3.8MB
+    const targetSampleRate = decoded.duration > 90 ? 8000 : 16000;
     const clippedDuration = Math.min(decoded.duration, maxDurationSec);
     const frameCount = Math.max(
       1,

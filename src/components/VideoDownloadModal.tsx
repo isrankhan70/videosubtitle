@@ -53,26 +53,14 @@ export const VideoDownloadModal: React.FC<VideoDownloadModalProps> = ({
 
   if (!isOpen) return null;
 
-  const fileToBase64 = (file: File): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const result = String(reader.result || '');
-        resolve(result.includes(',') ? result.split(',')[1] : result);
-      };
-      reader.onerror = (e) => reject(e);
-      reader.readAsDataURL(file);
-    });
-  };
-
   const handleRenderAndDownloadVideo = async () => {
     setIsRendering(true);
     setErrorMsg(null);
     setCompletedVideoInfo(null);
 
     try {
-      const targetW = nativeWidth || 1280;
-      const targetH = nativeHeight || 720;
+      const targetW = nativeWidth || 1920;
+      const targetH = nativeHeight || 1080;
 
       setRenderStep(
         `Rasterizing ${cues.length} বাংলা/EN subtitle overlays at native ${targetW}×${targetH}...`
@@ -84,18 +72,35 @@ export const VideoDownloadModal: React.FC<VideoDownloadModalProps> = ({
         targetH
       );
 
-      let videoBase64: string | undefined;
+      let uploadedFileId: string | undefined;
       let videoMimeType = 'video/mp4';
 
       if (uploadedVideoFile) {
+        videoMimeType = uploadedVideoFile.type || 'video/mp4';
+        const ext =
+          uploadedVideoFile.name.split('.').pop()?.toLowerCase() || 'mp4';
         setRenderStep(
-          `Reading original video stream (${(
+          `Streaming original video (${(
             uploadedVideoFile.size /
             (1024 * 1024)
-          ).toFixed(2)} MB)...`
+          ).toFixed(2)} MB) to studio renderer...`
         );
-        videoBase64 = await fileToBase64(uploadedVideoFile);
-        videoMimeType = uploadedVideoFile.type || 'video/mp4';
+
+        const uploadRes = await fetch('/api/video/upload-source', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/octet-stream',
+            'x-file-ext': ext,
+          },
+          body: uploadedVideoFile,
+        });
+        const uploadData = await uploadRes.json();
+        if (!uploadRes.ok || !uploadData.fileId) {
+          throw new Error(
+            uploadData.error || 'Failed to upload source video stream.'
+          );
+        }
+        uploadedFileId = uploadData.fileId;
       } else {
         setRenderStep(
           `Preparing master ${targetW}×${targetH} broadcast video stream...`
@@ -110,29 +115,22 @@ export const VideoDownloadModal: React.FC<VideoDownloadModalProps> = ({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          videoBase64,
+          uploadedFileId,
           videoMimeType,
           width: targetW,
           height: targetH,
-          duration: Math.min(120, Math.max(4, duration)),
+          duration: Math.min(1800, Math.max(4, duration)),
           overlays,
         }),
       });
 
       const data = await response.json();
-      if (!response.ok || !data.videoBase64) {
+      if (!response.ok || !data.downloadUrl) {
         throw new Error(
           data.error || 'Failed to render original-quality video.'
         );
       }
 
-      const binary = atob(data.videoBase64);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) {
-        bytes[i] = binary.charCodeAt(i);
-      }
-      const blob = new Blob([bytes], { type: 'video/mp4' });
-      const url = URL.createObjectURL(blob);
       const slug = projectTitle
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, '-')
@@ -142,16 +140,16 @@ export const VideoDownloadModal: React.FC<VideoDownloadModalProps> = ({
       }.mp4`;
 
       setCompletedVideoInfo({
-        url,
+        url: data.downloadUrl,
         filename,
-        byteSize: data.byteSize || bytes.byteLength,
+        byteSize: data.byteSize || 0,
         width: data.width || targetW,
         height: data.height || targetH,
       });
 
       // Trigger automatic download
       const a = document.createElement('a');
-      a.href = url;
+      a.href = data.downloadUrl;
       a.download = filename;
       a.click();
     } catch (err: any) {
@@ -193,7 +191,6 @@ export const VideoDownloadModal: React.FC<VideoDownloadModalProps> = ({
         </div>
 
         <div className="p-5 space-y-4">
-          {/* Original Quality & Resolution Specification Table */}
           <div className="p-3.5 bg-slate-900/90 border border-slate-800 rounded-lg space-y-2">
             <div className="flex items-center justify-between text-xs">
               <span className="text-slate-400">Source Video File</span>
@@ -236,7 +233,6 @@ export const VideoDownloadModal: React.FC<VideoDownloadModalProps> = ({
             </div>
           </div>
 
-          {/* Track Selector before burn-in */}
           <div>
             <label className="block text-xs font-medium text-slate-300 mb-1.5">
               Subtitle Track to Burn Into Video
@@ -303,8 +299,15 @@ export const VideoDownloadModal: React.FC<VideoDownloadModalProps> = ({
                   </div>
                   <div className="text-[11px] text-emerald-300 font-mono-tabular">
                     {completedVideoInfo.width}×{completedVideoInfo.height} px ·{' '}
-                    {(completedVideoInfo.byteSize / 1024).toFixed(1)} KB ·
-                    Original Quality MP4
+                    {completedVideoInfo.byteSize > 1024 * 1024
+                      ? `${(
+                          completedVideoInfo.byteSize /
+                          (1024 * 1024)
+                        ).toFixed(2)} MB`
+                      : `${(completedVideoInfo.byteSize / 1024).toFixed(
+                          1
+                        )} KB`}{' '}
+                    · Original Quality MP4
                   </div>
                 </div>
               </div>
