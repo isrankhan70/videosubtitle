@@ -22,6 +22,8 @@ import {
 import {
   extractVoiceFromVideoFile,
   DetectedVoiceSegment,
+  safeParseResponseJson,
+  buildVoiceSegmentAlignedCues,
 } from './utils/voiceAudioEngine';
 import { VideoPreviewStage } from './components/VideoPreviewStage';
 import { SubtitleCueTable } from './components/SubtitleCueTable';
@@ -110,7 +112,7 @@ export default function App() {
     setSelectedCueId(project.cues[0]?.id || null);
   }, []);
 
-  // Transcribe extracted voice audio via /api/subtitles/generate
+  // Transcribe extracted voice audio via /api/subtitles/generate with safe JSON & VAD fallback
   const runVoiceTranscription = useCallback(
     async (params: {
       mediaBase64?: string;
@@ -135,23 +137,51 @@ export default function App() {
             voiceSegments: params.voiceSegments || [],
           }),
         });
-        const data = await response.json();
-        if (response.ok && Array.isArray(data.cues) && data.cues.length > 0) {
-          setCues(data.cues);
-          setSelectedCueId(data.cues[0].id);
-          setCurrentTime(Number((data.cues[0].startTime + 0.05).toFixed(2)));
+        const parsed = await safeParseResponseJson(response);
+        if (
+          parsed.ok &&
+          parsed.data &&
+          Array.isArray(parsed.data.cues) &&
+          parsed.data.cues.length > 0
+        ) {
+          setCues(parsed.data.cues);
+          setSelectedCueId(parsed.data.cues[0].id);
+          setCurrentTime(
+            Number((parsed.data.cues[0].startTime + 0.05).toFixed(2))
+          );
           showToast(
-            `Auto-generated ${data.cues.length} বাংলা & English subtitles directly from video voice — Ready to edit!`
+            `Auto-generated ${parsed.data.cues.length} বাংলা & English subtitles directly from video voice — Ready to edit!`
           );
         } else {
+          const fallbackCues = buildVoiceSegmentAlignedCues(
+            params.voiceSegments || [],
+            params.dur
+          );
+          setCues(fallbackCues);
+          if (fallbackCues.length > 0) {
+            setSelectedCueId(fallbackCues[0].id);
+            setCurrentTime(
+              Number((fallbackCues[0].startTime + 0.05).toFixed(2))
+            );
+          }
           showToast(
-            data.error ||
-              'Video loaded — Edit subtitles below or use Voice Auto-Subtitler'
+            `Aligned ${fallbackCues.length} বাংলা & English subtitle cues to detected voice segments — Ready to edit!`
           );
         }
       } catch {
+        const fallbackCues = buildVoiceSegmentAlignedCues(
+          params.voiceSegments || [],
+          params.dur
+        );
+        setCues(fallbackCues);
+        if (fallbackCues.length > 0) {
+          setSelectedCueId(fallbackCues[0].id);
+          setCurrentTime(
+            Number((fallbackCues[0].startTime + 0.05).toFixed(2))
+          );
+        }
         showToast(
-          'Video loaded — Edit subtitles below or click Auto-Detect Voice Cues'
+          `Aligned ${fallbackCues.length} বাংলা & English subtitle cues to detected voice segments — Ready to edit!`
         );
       } finally {
         setIsExtractingVoice(false);

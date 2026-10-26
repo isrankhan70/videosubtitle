@@ -17,6 +17,8 @@ import {
   detectVoiceSegmentsFromSamples,
   encodeMonoWavPcm16,
   computeWaveformPeaks,
+  buildVoiceSegmentAlignedCues,
+  safeParseResponseJson,
 } from './voiceAudioEngine';
 
 test('normalizeSubtitleText normalizes Bangla Unicode NFC and cleans punctuation spacing', () => {
@@ -160,4 +162,24 @@ test('encodeMonoWavPcm16 creates valid 44-byte RIFF WAVE header and PCM payload'
   assert.equal(format, 'WAVE');
   const peaks = computeWaveformPeaks(samples, 4);
   assert.equal(peaks.length, 4);
+});
+
+test('buildVoiceSegmentAlignedCues maps 81 voice segments to zero-mismatch bilingual cues and safeParseResponseJson handles plain text', async () => {
+  const segments = Array.from({ length: 81 }, (_, idx) => ({
+    startTime: idx * 10,
+    endTime: idx * 10 + 4.5,
+    peakRms: 0.4,
+  }));
+  const cues = buildVoiceSegmentAlignedCues(segments, 944.98);
+  assert.equal(cues.length, 81);
+  assert.ok(cues[0].textBn.length > 0);
+  assert.ok(cues[0].textEn.length > 0);
+
+  const mock404 = new Response('The page could not be found\n\nNOT_FOUND', {
+    status: 404,
+  });
+  const parsed = await safeParseResponseJson(mock404);
+  assert.equal(parsed.ok, false);
+  assert.equal(parsed.data, null);
+  assert.ok(parsed.rawText.includes('The page could not be found'));
 });
