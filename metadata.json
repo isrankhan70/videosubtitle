@@ -2,5 +2,7 @@
   "name": "VaniSub Studio — Bangla & English AI Subtitle Editor",
   "description": "Broadcast-grade automatic video subtitle generator and frame-accurate bilingual editor for Bangla and English with standard Unicode typography and zero-mismatch synchronization.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

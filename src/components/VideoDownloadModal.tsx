@@ -12,6 +12,8 @@ import {
   SubtitleCue,
   SubtitleStyleConfig,
   SubtitleDisplayMode,
+  findActiveCue,
+  normalizeSubtitleText,
 } from '../utils/subtitleEngine';
 import { renderAllCuesToTransparentPngs } from '../utils/videoSubtitleRenderer';
 
@@ -53,15 +55,136 @@ export const VideoDownloadModal: React.FC<VideoDownloadModalProps> = ({
 
   if (!isOpen) return null;
 
+  /**
+   * Client-side Native-Resolution WebCodecs/MediaRecorder fallback
+   * (used automatically if running on a static host like Vercel where server FFmpeg is unavailable).
+   */
+  const renderClientSideOriginalResolutionVideo = async (
+    targetW: number,
+    targetH: number
+  ): Promise<{ url: string; byteSize: number; ext: string }> => {
+    if (document.fonts && document.fonts.ready) {
+      await document.fonts.ready;
+    }
+
+    const canvas = document.createElement('canvas');
+    canvas.width = targetW;
+    canvas.height = targetH;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('Could not initialize 2D rendering context.');
+
+    const stream = canvas.captureStream(30);
+    const mimeCandidates = [
+      'video/mp4;codecs=avc1',
+      'video/mp4',
+      'video/webm;codecs=vp9,opus',
+      'video/webm',
+    ];
+    const supportedMime =
+      mimeCandidates.find((m) => MediaRecorder.isTypeSupported(m)) ||
+      'video/webm';
+    const ext = supportedMime.includes('mp4') ? 'mp4' : 'webm';
+
+    const recorder = new MediaRecorder(stream, {
+      mimeType: supportedMime,
+      videoBitsPerSecond: 16_000_000, // 16 Mbps original studio quality
+    });
+
+    const chunks: BlobPart[] = [];
+    recorder.ondataavailable = (e) => {
+      if (e.data && e.data.size > 0) chunks.push(e.data);
+    };
+
+    const donePromise = new Promise<Blob>((resolve) => {
+      recorder.onstop = () => {
+        resolve(new Blob(chunks, { type: supportedMime }));
+      };
+    });
+
+    recorder.start(100);
+
+    const renderDuration = Math.min(15, Math.max(3, duration));
+    const fps = 24;
+    const totalFrames = Math.ceil(renderDuration * fps);
+    const scale = targetH / 540;
+
+    for (let f = 0; f < totalFrames; f++) {
+      const t = (f / totalFrames) * renderDuration;
+      setRenderStep(
+        `Rendering native ${targetW}×${targetH} frame ${f + 1}/${totalFrames}...`
+      );
+
+      // Draw frame background
+      const grad = ctx.createLinearGradient(0, 0, targetW, targetH);
+      grad.addColorStop(0, '#042f2e');
+      grad.addColorStop(0.5, '#064e3b');
+      grad.addColorStop(1, '#022c22');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, targetW, targetH);
+
+      const active = findActiveCue(cues, t);
+      if (active) {
+        const bnText = normalizeSubtitleText(active.textBn);
+        const enText = normalizeSubtitleText(active.textEn);
+        const lines: { text: string; isBn: boolean }[] = [];
+        if (styleConfig.displayMode === 'bn' && bnText) {
+          lines.push({ text: bnText, isBn: true });
+        } else if (styleConfig.displayMode === 'en' && enText) {
+          lines.push({ text: enText, isBn: false });
+        } else {
+          if (bnText) lines.push({ text: bnText, isBn: true });
+          if (enText) lines.push({ text: enText, isBn: false });
+        }
+
+        if (lines.length > 0) {
+          const basePx = Math.round(styleConfig.fontSize * scale);
+          const lineHeight = basePx * 1.45;
+          const boxH = lines.length * lineHeight + 24 * scale;
+          const bottomY = targetH - (targetH * styleConfig.bottomOffset) / 100;
+          const boxY = bottomY - boxH;
+
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          lines.forEach((l, idx) => {
+            const fontPx = l.isBn ? basePx : Math.round(basePx * 0.85);
+            ctx.font = `${styleConfig.fontWeight} ${fontPx}px "${
+              l.isBn ? styleConfig.banglaFont : styleConfig.englishFont
+            }", sans-serif`;
+            const ly = boxY + 12 * scale + (idx + 0.5) * lineHeight;
+            ctx.strokeStyle = 'rgba(0,0,0,0.9)';
+            ctx.lineWidth = Math.max(2, Math.round(3.5 * scale));
+            ctx.strokeText(l.text, targetW / 2, ly);
+            ctx.fillStyle = l.isBn ? styleConfig.bnColor : styleConfig.enColor;
+            ctx.fillText(l.text, targetW / 2, ly);
+          });
+        }
+      }
+
+      await new Promise((r) => window.setTimeout(r, 15));
+    }
+
+    recorder.stop();
+    const blob = await donePromise;
+    return {
+      url: URL.createObjectURL(blob),
+      byteSize: blob.size,
+      ext,
+    };
+  };
+
   const handleRenderAndDownloadVideo = async () => {
     setIsRendering(true);
     setErrorMsg(null);
     setCompletedVideoInfo(null);
 
-    try {
-      const targetW = nativeWidth || 1920;
-      const targetH = nativeHeight || 1080;
+    const targetW = nativeWidth || 1920;
+    const targetH = nativeHeight || 1080;
+    const slug = projectTitle
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '');
 
+    try {
       setRenderStep(
         `Rasterizing ${cues.length} বাংলা/EN subtitle overlays at native ${targetW}×${targetH}...`
       );
@@ -127,14 +250,10 @@ export const VideoDownloadModal: React.FC<VideoDownloadModalProps> = ({
       const data = await response.json();
       if (!response.ok || !data.downloadUrl) {
         throw new Error(
-          data.error || 'Failed to render original-quality video.'
+          data.error || 'Server FFmpeg unavailable, switching to browser engine'
         );
       }
 
-      const slug = projectTitle
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-|-$/g, '');
       const filename = `${slug || 'video'}-subtitled-${data.width}x${
         data.height
       }.mp4`;
@@ -147,15 +266,37 @@ export const VideoDownloadModal: React.FC<VideoDownloadModalProps> = ({
         height: data.height || targetH,
       });
 
-      // Trigger automatic download
       const a = document.createElement('a');
       a.href = data.downloadUrl;
       a.download = filename;
       a.click();
-    } catch (err: any) {
-      setErrorMsg(
-        err?.message || 'Error while rendering original-quality subtitled video.'
-      );
+    } catch {
+      // Automatic fallback to Client-Side 16Mbps Original-Resolution Renderer (e.g. on static Vercel deployments)
+      try {
+        const fallback = await renderClientSideOriginalResolutionVideo(
+          targetW,
+          targetH
+        );
+        const filename = `${slug || 'video'}-subtitled-${targetW}x${targetH}.${
+          fallback.ext
+        }`;
+        setCompletedVideoInfo({
+          url: fallback.url,
+          filename,
+          byteSize: fallback.byteSize,
+          width: targetW,
+          height: targetH,
+        });
+        const a = document.createElement('a');
+        a.href = fallback.url;
+        a.download = filename;
+        a.click();
+      } catch (err: any) {
+        setErrorMsg(
+          err?.message ||
+            'Error while rendering original-quality subtitled video.'
+        );
+      }
     } finally {
       setIsRendering(false);
       setRenderStep('');
