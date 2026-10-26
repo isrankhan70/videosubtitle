@@ -12,8 +12,10 @@ import { SubtitleCue } from '../utils/subtitleEngine';
 import {
   extractVoiceFromVideoFile,
   DetectedVoiceSegment,
+  VoiceAudioBatch,
   safeParseResponseJson,
   buildVoiceSegmentAlignedCues,
+  transcribeExtractedVoiceBatches,
 } from '../utils/voiceAudioEngine';
 
 interface AiAutoSubtitleModalProps {
@@ -52,6 +54,7 @@ export const AiAutoSubtitleModal: React.FC<AiAutoSubtitleModalProps> = ({
   const [voiceSegments, setVoiceSegments] = useState<DetectedVoiceSegment[]>(
     []
   );
+  const [voiceBatches, setVoiceBatches] = useState<VoiceAudioBatch[]>([]);
   const [statusStep, setStatusStep] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -65,15 +68,18 @@ export const AiAutoSubtitleModal: React.FC<AiAutoSubtitleModalProps> = ({
     const cleanName = file.name.replace(/\.[^/.]+$/, '');
     setVideoTitle(cleanName);
     setErrorMsg(null);
-    setStatusStep('Extracting 8kHz/16kHz voice audio & detecting speech segments...');
+    setStatusStep(
+      'Extracting 8kHz voice audio & packing speech segments across full video...'
+    );
 
     try {
       const voiceResult = await extractVoiceFromVideoFile(file);
       setDetectedDuration(voiceResult.duration);
       setExtractedWavBase64(voiceResult.wavBase64);
       setVoiceSegments(voiceResult.voiceSegments);
+      setVoiceBatches(voiceResult.batches);
       setStatusStep(
-        `Extracted voice track (${voiceResult.duration}s) · ${voiceResult.voiceSegments.length} spoken segments detected`
+        `Extracted voice track (${voiceResult.duration}s) · ${voiceResult.voiceSegments.length} spoken segments ready for verbatim transcription`
       );
       onVideoFileSelected(file, {
         duration: voiceResult.duration,
@@ -82,7 +88,7 @@ export const AiAutoSubtitleModal: React.FC<AiAutoSubtitleModalProps> = ({
       });
     } catch {
       setStatusStep(
-        'Video loaded — Ready to align bilingual subtitles to video timeline'
+        'Video loaded — Ready to extract & transcribe spoken voice'
       );
       onVideoFileSelected(file);
     }
@@ -99,13 +105,35 @@ export const AiAutoSubtitleModal: React.FC<AiAutoSubtitleModalProps> = ({
     setErrorMsg(null);
 
     try {
+      // 1. If we have Speech-Compacted Batches from the uploaded video file, transcribe EVERY batch
+      // so 100% of the spoken words across the entire video (even 15+ min / 81+ segments) are transcribed!
+      if (voiceBatches.length > 0) {
+        const { cues: allTranscribedCues } =
+          await transcribeExtractedVoiceBatches({
+            batches: voiceBatches,
+            duration: detectedDuration,
+            videoTitle: videoTitle.trim() || 'Uploaded Video',
+            spokenHints: spokenHints.trim(),
+            onStatusUpdate: (stepText) => setStatusStep(stepText),
+            onBatchCuesReady: (partialCues) => {
+              onSubtitlesGenerated(partialCues, videoTitle.trim());
+            },
+          });
+
+        if (allTranscribedCues.length > 0) {
+          onSubtitlesGenerated(allTranscribedCues, videoTitle.trim());
+          onClose();
+          return;
+        }
+      }
+
+      // 2. Single-request fallback (e.g., topic generation or server FFmpeg stream extraction)
       const mediaBase64: string | undefined = extractedWavBase64 || undefined;
       const mimeType: string | undefined = extractedWavBase64
         ? 'audio/wav'
         : undefined;
       let uploadedFileId: string | undefined;
 
-      // Only attempt binary stream upload if WebAudio didn't already extract the WAV
       if (!mediaBase64 && selectedFile) {
         setStatusStep('Streaming video to server for FFmpeg voice extraction...');
         try {
@@ -159,8 +187,6 @@ export const AiAutoSubtitleModal: React.FC<AiAutoSubtitleModalProps> = ({
         return;
       }
 
-      // If running on a static deployment or payload was rejected by proxy,
-      // align subtitles directly to the detected acoustic voice segments so it NEVER fails!
       const alignedCues = buildVoiceSegmentAlignedCues(
         voiceSegments,
         detectedDuration,
@@ -233,6 +259,9 @@ export const AiAutoSubtitleModal: React.FC<AiAutoSubtitleModalProps> = ({
                   <span className="text-[11px] text-emerald-300 font-mono-tabular">
                     {(selectedFile.size / (1024 * 1024)).toFixed(2)} MB ·{' '}
                     {detectedDuration}s · {voiceSegments.length} Voice Segments
+                    {voiceBatches.length > 1
+                      ? ` (${voiceBatches.length} Audio Batches)`
+                      : ''}
                   </span>
                 </>
               ) : (
@@ -242,8 +271,8 @@ export const AiAutoSubtitleModal: React.FC<AiAutoSubtitleModalProps> = ({
                     Select Video File (.MP4, .MOV, .WEBM) to Extract Voice
                   </span>
                   <span className="text-[11px] text-slate-400">
-                    Extracts voice audio &amp; auto-aligns বাংলা + English
-                    subtitles to spoken voice
+                    Extracts spoken voice &amp; transcribes exact বাংলা + English
+                    words for every segment
                   </span>
                 </>
               )}

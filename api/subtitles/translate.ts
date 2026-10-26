@@ -1,9 +1,30 @@
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, Type, ThinkingLevel } from '@google/genai';
 import {
   normalizeSubtitleText,
   autoFixSubtitleMismatches,
   SubtitleCue,
 } from '../../src/utils/subtitleEngine';
+
+function parseJsonArraySafely(rawText: string): any[] {
+  const trimmed = (rawText || '').trim();
+  if (!trimmed) return [];
+  try {
+    const direct = JSON.parse(trimmed);
+    if (Array.isArray(direct)) return direct;
+  } catch {
+    const startIdx = trimmed.indexOf('[');
+    const endIdx = trimmed.lastIndexOf(']');
+    if (startIdx !== -1 && endIdx > startIdx) {
+      try {
+        const sliced = JSON.parse(trimmed.slice(startIdx, endIdx + 1));
+        if (Array.isArray(sliced)) return sliced;
+      } catch {
+        return [];
+      }
+    }
+  }
+  return [];
+}
 
 export default async function handler(req: any, res: any) {
   if (req.method !== 'POST') {
@@ -11,7 +32,7 @@ export default async function handler(req: any, res: any) {
     return;
   }
 
-  const { cues = [], direction = 'auto' } = req.body || {};
+  const { cues, direction = 'auto' } = req.body || {};
   if (!Array.isArray(cues) || cues.length === 0) {
     res.status(400).json({ error: 'No subtitle cues provided.' });
     return;
@@ -50,9 +71,10 @@ ${JSON.stringify(
 )}`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
+      model: 'gemini-3-flash-preview',
       contents: prompt,
       config: {
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
         responseMimeType: 'application/json',
         responseSchema: {
           type: Type.ARRAY,
@@ -69,7 +91,7 @@ ${JSON.stringify(
       },
     });
 
-    const updatedList = JSON.parse(response.text || '[]');
+    const updatedList = parseJsonArraySafely(response.text || '[]');
     const mapById = new Map<string, { textBn: string; textEn: string }>();
     for (const item of updatedList) {
       if (item && item.id) {

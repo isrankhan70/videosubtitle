@@ -24,6 +24,7 @@ import {
   DetectedVoiceSegment,
   safeParseResponseJson,
   buildVoiceSegmentAlignedCues,
+  transcribeExtractedVoiceBatches,
 } from './utils/voiceAudioEngine';
 import { VideoPreviewStage } from './components/VideoPreviewStage';
 import { SubtitleCueTable } from './components/SubtitleCueTable';
@@ -191,7 +192,7 @@ export default function App() {
     [showToast]
   );
 
-  // Load user's custom video file AND automatically extract voice -> auto-subtitle!
+  // Load user's custom video file AND automatically extract voice -> auto-subtitle across all batches!
   const handleUploadVideoFile = useCallback(
     async (
       file: File,
@@ -214,20 +215,51 @@ export default function App() {
         return;
       }
 
-      // Automatically extract spoken voice from uploaded video and generate subtitles
+      // Automatically extract spoken voice from uploaded video and generate verbatim subtitles across all speech batches
       setIsExtractingVoice(true);
+      setIsGeneratingAi(true);
       showToast(
-        `Extracting voice from "${file.name}" to auto-generate বাংলা & English subtitles...`
+        `Extracting voice from "${file.name}" to transcribe spoken বাংলা & English subtitles...`
       );
       try {
         const voiceData = await extractVoiceFromVideoFile(file);
         setDuration(voiceData.duration);
         setWaveformPeaks(voiceData.waveformPeaks);
+        const cleanTitle = file.name.replace(/\.[^/.]+$/, '');
+
+        if (voiceData.batches && voiceData.batches.length > 0) {
+          const { cues: allTranscribed } =
+            await transcribeExtractedVoiceBatches({
+              batches: voiceData.batches,
+              duration: voiceData.duration,
+              videoTitle: cleanTitle,
+              onStatusUpdate: (stepMsg) => showToast(stepMsg),
+              onBatchCuesReady: (partialCues) => {
+                setCues(partialCues);
+                if (partialCues.length > 0) {
+                  setSelectedCueId(partialCues[0].id);
+                }
+              },
+            });
+
+          if (allTranscribed.length > 0) {
+            setCues(allTranscribed);
+            setSelectedCueId(allTranscribed[0].id);
+            setCurrentTime(
+              Number((allTranscribed[0].startTime + 0.05).toFixed(2))
+            );
+            showToast(
+              `Transcribed ${allTranscribed.length} বাংলা & English subtitles directly from spoken video voice!`
+            );
+            return;
+          }
+        }
+
         await runVoiceTranscription({
           mediaBase64: voiceData.wavBase64,
           mimeType: voiceData.mimeType,
           dur: voiceData.duration,
-          title: file.name.replace(/\.[^/.]+$/, ''),
+          title: cleanTitle,
           voiceSegments: voiceData.voiceSegments,
         });
       } catch {
@@ -254,10 +286,12 @@ export default function App() {
         } catch {
           // ignore
         }
-        setIsExtractingVoice(false);
         showToast(
           `Loaded "${file.name}" — Click "Auto-Detect Voice Cues" to transcribe`
         );
+      } finally {
+        setIsExtractingVoice(false);
+        setIsGeneratingAi(false);
       }
     },
     [runVoiceTranscription, showToast, duration]

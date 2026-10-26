@@ -6,13 +6,16 @@ import fs from 'fs';
 import os from 'os';
 import { execFile } from 'child_process';
 import { fileURLToPath } from 'url';
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, Type, ThinkingLevel } from '@google/genai';
 import {
   normalizeSubtitleText,
   autoFixSubtitleMismatches,
   SubtitleCue,
 } from './src/utils/subtitleEngine.ts';
-import { buildVoiceSegmentAlignedCues } from './src/utils/voiceAudioEngine.ts';
+import {
+  buildVoiceSegmentAlignedCues,
+  DetectedVoiceSegment,
+} from './src/utils/voiceAudioEngine.ts';
 
 dotenv.config();
 
@@ -108,9 +111,12 @@ async function startServer() {
   // Increase JSON limit for audio WAV payloads and PNG overlays
   app.use(express.json({ limit: '150mb' }));
 
+  const AUDIO_MODELS = [
+    'gemini-3-flash-preview',
+    'gemini-3.1-flash-lite-preview',
+  ];
+
   // 1. Auto-Generate Subtitles Directly from Video Voice Audio
-  // IMPORTANT: Never pass `systemInstruction` ("Developer instruction") because
-  // `gemini-3.5-transcribe` and certain audio models reject `systemInstruction` with HTTP 400!
   app.post('/api/subtitles/generate', async (req, res) => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vanisub-voice-'));
     try {
@@ -122,7 +128,12 @@ async function startServer() {
         videoTitle = 'Uploaded Video',
         spokenHints = '',
         voiceSegments = [],
+        isCompactedBatch = false,
       } = req.body;
+
+      const typedSegments: DetectedVoiceSegment[] = Array.isArray(voiceSegments)
+        ? voiceSegments
+        : [];
 
       const ai = getGenAIClient();
 
@@ -197,27 +208,42 @@ async function startServer() {
         }
       }
 
-      const vadGuidance =
-        Array.isArray(voiceSegments) && voiceSegments.length > 0
-          ? `\nDetected Acoustic Voice Activity Segments (use these spoken voice intervals to align startTime and endTime):\n${JSON.stringify(
-              voiceSegments.slice(0, 65)
-            )}`
+      const segmentTable =
+        typedSegments.length > 0
+          ? typedSegments
+              .map((seg, i) => {
+                const clipInfo =
+                  isCompactedBatch &&
+                  seg.clipStart !== undefined &&
+                  seg.clipEnd !== undefined
+                    ? `Audio Clip Window: [${seg.clipStart.toFixed(
+                        2
+                      )}s - ${seg.clipEnd.toFixed(2)}s] -> `
+                    : '';
+                return `Segment #${
+                  i + 1
+                }: ${clipInfo}Video Timestamp: startTime=${seg.startTime.toFixed(
+                  2
+                )}, endTime=${seg.endTime.toFixed(2)}`;
+              })
+              .join('\n')
           : '';
 
-      const fullInstructionsPrompt = `You are an expert broadcast subtitle timer and bilingual Bangla-English audio transcriber.
-Task: Generate frame-accurate, zero-mismatch bilingual subtitles (both Standard Unicode NFC Bangla and natural English) for this video (total duration: ${Number(
-        duration
-      ).toFixed(1)} seconds, title: "${videoTitle}").
-${spokenHints ? `Additional speaker/context notes: ${spokenHints}` : ''}${vadGuidance}
-
-Strict Broadcast Rules:
-1. Listen to the spoken voice audio and transcribe every spoken phrase accurately.
-2. If the speaker speaks in Bangla, transcribe the exact Bangla words in "textBn" and provide an accurate English translation in "textEn". If the speaker speaks in English (or another language), transcribe the English in "textEn" and provide a natural, standard Unicode Bangla translation in "textBn".
-3. Every cue MUST include both "textBn" (standard Unicode NFC Bangla with proper যুক্তবর্ণ and দাড়ি '।') and "textEn" (natural English).
-4. Timestamps ("startTime" and "endTime" in seconds) MUST match when the voice is speaking, be strictly sequential, non-overlapping, within 0.0 to ${Number(
-        duration
-      ).toFixed(1)} seconds.
-5. Return ONLY a valid JSON array of objects with keys: "startTime" (number), "endTime" (number), "textBn" (string), "textEn" (string), "speaker" (string).`;
+      const fullInstructionsPrompt = `You are a verbatim broadcast audio transcriber and bilingual Bangla-English subtitle translator.
+Listen carefully to the attached voice audio from the video "${videoTitle}".
+${spokenHints ? `Speaker / Context Notes: ${spokenHints}\n` : ''}
+CRITICAL TRANSCRIPTION RULES (MUST FOLLOW):
+1. Transcribe the EXACT words spoken by the human voice in the audio. NEVER invent generic summary sentences or placeholder text.
+2. If the speaker speaks in Bangla (or mixed Bangla/English), write the exact spoken Bangla words in "textBn" (Standard Unicode NFC Bangla with accurate যুক্তবর্ণ and দাড়ি '।') and translate those exact words into natural English in "textEn".
+3. If the speaker speaks in English (or another language), write the exact spoken English words in "textEn" and translate those exact words into natural Unicode Bangla in "textBn".
+4. ${
+        typedSegments.length > 0
+          ? `Match your transcription 1-to-1 to the following ${typedSegments.length} detected voice segments in exact order:\n${segmentTable}`
+          : `Generate sequential, non-overlapping timestamps ("startTime" and "endTime" in seconds) within 0.0 to ${Number(
+              duration
+            ).toFixed(1)}s matching when the voice speaks.`
+      }
+5. Return ONLY a JSON array of objects with keys: "startTime" (number), "endTime" (number), "textBn" (string), "textEn" (string), "speaker" (string).`;
 
       let parsedCuesArray: any[] = [];
 
@@ -229,45 +255,14 @@ Strict Broadcast Rules:
           },
         };
 
-        // Step 1: Try gemini-3.5-transcribe with NO systemInstruction and NO responseSchema
-        // (since gemini-3.5-transcribe does not enable developer instruction)
-        let rawTranscript = '';
-        try {
-          const transcribeRes = await ai.models.generateContent({
-            model: 'gemini-3.5-transcribe',
-            contents: {
-              parts: [
-                audioPart,
-                {
-                  text: `Transcribe the spoken voice in this audio accurately. Include everything spoken in Bangla or English.${
-                    spokenHints ? ` Context: ${spokenHints}` : ''
-                  }`,
-                },
-              ],
-            },
-          });
-          rawTranscript = (transcribeRes.text || '').trim();
-        } catch (transcribeErr: any) {
-          console.warn(
-            'gemini-3.5-transcribe direct step note, falling back to multimodal gemini-3.8-flash:',
-            transcribeErr?.message
-          );
-        }
-
-        if (rawTranscript) {
-          // Try parsing if gemini-3.5-transcribe already returned JSON, otherwise structure & align via gemini-3.8-flash (without systemInstruction)
-          const maybeJson = parseJsonArraySafely(rawTranscript);
-          if (
-            maybeJson.length > 0 &&
-            maybeJson[0].textBn !== undefined &&
-            maybeJson[0].startTime !== undefined
-          ) {
-            parsedCuesArray = maybeJson;
-          } else {
-            const alignRes = await ai.models.generateContent({
-              model: 'gemini-3.8-flash',
-              contents: `${fullInstructionsPrompt}\n\nRaw Voice Transcript from Audio:\n"""\n${rawTranscript}\n"""`,
+        // Primary fast multimodal audio models (gemini-3-flash-preview -> gemini-3.1-flash-lite-preview)
+        for (const modelName of AUDIO_MODELS) {
+          try {
+            const multimodalRes = await ai.models.generateContent({
+              model: modelName,
+              contents: [audioPart, fullInstructionsPrompt],
               config: {
+                thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
                 responseMimeType: 'application/json',
                 responseSchema: {
                   type: Type.ARRAY,
@@ -285,41 +280,58 @@ Strict Broadcast Rules:
                 },
               },
             });
-            parsedCuesArray = parseJsonArraySafely(alignRes.text || '[]');
+            parsedCuesArray = parseJsonArraySafely(multimodalRes.text || '[]');
+            if (parsedCuesArray.length > 0) break;
+          } catch (modelErr: any) {
+            console.warn(
+              `Audio model ${modelName} retry note:`,
+              modelErr?.message
+            );
           }
-        } else {
-          // Multimodal fallback with gemini-3.8-flash (still NO systemInstruction)
-          const multimodalRes = await ai.models.generateContent({
-            model: 'gemini-3.8-flash',
-            contents: {
-              parts: [audioPart, { text: fullInstructionsPrompt }],
-            },
-            config: {
-              responseMimeType: 'application/json',
-              responseSchema: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    startTime: { type: Type.NUMBER },
-                    endTime: { type: Type.NUMBER },
-                    textBn: { type: Type.STRING },
-                    textEn: { type: Type.STRING },
-                    speaker: { type: Type.STRING },
+        }
+
+        // Secondary fallback via gemini-3.5-transcribe if needed
+        if (parsedCuesArray.length === 0) {
+          try {
+            const transcribeRes = await ai.models.generateContent({
+              model: 'gemini-3.5-transcribe',
+              contents: {
+                parts: [
+                  audioPart,
+                  {
+                    text: `Transcribe every spoken word in this audio verbatim in Bangla or English.${
+                      spokenHints ? ` Context: ${spokenHints}` : ''
+                    }`,
                   },
-                  required: ['startTime', 'endTime', 'textBn', 'textEn'],
-                },
+                ],
               },
-            },
-          });
-          parsedCuesArray = parseJsonArraySafely(multimodalRes.text || '[]');
+            });
+            const rawTranscript = (transcribeRes.text || '').trim();
+            if (rawTranscript) {
+              const alignRes = await ai.models.generateContent({
+                model: 'gemini-3-flash-preview',
+                contents: `${fullInstructionsPrompt}\n\nVerbatim Transcript from Audio:\n"""\n${rawTranscript}\n"""`,
+                config: {
+                  thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+                  responseMimeType: 'application/json',
+                },
+              });
+              parsedCuesArray = parseJsonArraySafely(alignRes.text || '[]');
+            }
+          } catch (transcribeErr: any) {
+            console.warn(
+              'gemini-3.5-transcribe fallback note:',
+              transcribeErr?.message
+            );
+          }
         }
       } else {
-        // Text/topic-based subtitle generation (NO systemInstruction)
+        // Text/topic-based subtitle generation
         const textRes = await ai.models.generateContent({
-          model: 'gemini-3.8-flash',
+          model: 'gemini-3-flash-preview',
           contents: fullInstructionsPrompt,
           config: {
+            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
             responseMimeType: 'application/json',
             responseSchema: {
               type: Type.ARRAY,
@@ -342,17 +354,24 @@ Strict Broadcast Rules:
 
       const rawCues: SubtitleCue[] =
         parsedCuesArray.length > 0
-          ? parsedCuesArray.map((item: any, idx: number) => ({
-              id: `voice-cue-${idx + 1}-${Date.now()}`,
-              startTime: Number(item.startTime) ?? idx * 3.5,
-              endTime: Number(item.endTime) || (idx + 1) * 3.5 - 0.2,
-              textBn: normalizeSubtitleText(String(item.textBn || '')),
-              textEn: normalizeSubtitleText(String(item.textEn || '')),
-              speaker: item.speaker ? String(item.speaker) : 'Voice Track',
-              confidence: 0.99,
-            }))
+          ? parsedCuesArray.map((item: any, idx: number) => {
+              const matchedSeg = typedSegments[idx];
+              return {
+                id: `voice-cue-${idx + 1}-${Date.now()}`,
+                startTime: matchedSeg
+                  ? matchedSeg.startTime
+                  : Number(item.startTime) ?? idx * 3.5,
+                endTime: matchedSeg
+                  ? matchedSeg.endTime
+                  : Number(item.endTime) || (idx + 1) * 3.5 - 0.2,
+                textBn: normalizeSubtitleText(String(item.textBn || '')),
+                textEn: normalizeSubtitleText(String(item.textEn || '')),
+                speaker: item.speaker ? String(item.speaker) : 'Voice Track',
+                confidence: 0.99,
+              };
+            })
           : buildVoiceSegmentAlignedCues(
-              Array.isArray(voiceSegments) ? voiceSegments : [],
+              typedSegments,
               Number(duration) || 24,
               String(spokenHints || '')
             );
@@ -361,9 +380,7 @@ Strict Broadcast Rules:
       res.json({
         cues: cleanCues,
         voiceAligned: true,
-        detectedSegmentCount: Array.isArray(voiceSegments)
-          ? voiceSegments.length
-          : cleanCues.length,
+        detectedSegmentCount: typedSegments.length || cleanCues.length,
       });
     } catch (error: any) {
       console.error('Error generating voice subtitles:', error);
@@ -412,9 +429,10 @@ ${JSON.stringify(
 )}`;
 
       const response = await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
+        model: 'gemini-3-flash-preview',
         contents: prompt,
         config: {
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.ARRAY,

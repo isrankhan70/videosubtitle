@@ -19,6 +19,7 @@ import {
   computeWaveformPeaks,
   buildVoiceSegmentAlignedCues,
   safeParseResponseJson,
+  createSpeechCompactedBatches,
 } from './voiceAudioEngine';
 
 test('normalizeSubtitleText normalizes Bangla Unicode NFC and cleans punctuation spacing', () => {
@@ -164,11 +165,36 @@ test('encodeMonoWavPcm16 creates valid 44-byte RIFF WAVE header and PCM payload'
   assert.equal(peaks.length, 4);
 });
 
+test('createSpeechCompactedBatches packs 81 voice segments into Vercel-safe speech WAV batches preserving video timestamps', () => {
+  const sampleRate = 1000;
+  const totalSamples = new Float32Array(sampleRate * 945);
+  const segments = Array.from({ length: 81 }, (_, idx) => ({
+    startTime: idx * 11,
+    endTime: idx * 11 + 3.0,
+    rmsEnergy: 0.45,
+  }));
+
+  const batches = createSpeechCompactedBatches(
+    totalSamples,
+    sampleRate,
+    segments,
+    18
+  );
+  assert.equal(batches.length, 5); // ceil(81 / 18) = 5 batches
+  assert.equal(batches[0].segments.length, 18);
+  assert.equal(batches[4].segments.length, 9);
+  // Last segment preserves its original 880s video timestamp while having a compact clipStart/clipEnd
+  const lastSeg = batches[4].segments[8];
+  assert.equal(lastSeg.startTime, 880);
+  assert.equal(lastSeg.endTime, 883);
+  assert.ok((lastSeg.clipEnd || 0) < 40);
+});
+
 test('buildVoiceSegmentAlignedCues maps 81 voice segments to zero-mismatch bilingual cues and safeParseResponseJson handles plain text', async () => {
   const segments = Array.from({ length: 81 }, (_, idx) => ({
     startTime: idx * 10,
     endTime: idx * 10 + 4.5,
-    peakRms: 0.4,
+    rmsEnergy: 0.4,
   }));
   const cues = buildVoiceSegmentAlignedCues(segments, 944.98);
   assert.equal(cues.length, 81);
