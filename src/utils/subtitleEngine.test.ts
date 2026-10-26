@@ -13,6 +13,11 @@ import {
   splitCueAtTime,
   SubtitleCue,
 } from './subtitleEngine';
+import {
+  detectVoiceSegmentsFromSamples,
+  encodeMonoWavPcm16,
+  computeWaveformPeaks,
+} from './voiceAudioEngine';
 
 test('normalizeSubtitleText normalizes Bangla Unicode NFC and cleans punctuation spacing', () => {
   const messy = '  আজকের   ভিডিওতে আপনাদের স্বাগতম ।  ';
@@ -124,4 +129,35 @@ test('splitCueAtTime splits cue into two sequential non-overlapping NFC cues', (
   assert.ok(split[0].endTime < split[1].startTime);
   assert.equal(split[0].textBn, 'প্রথম অংশ');
   assert.equal(split[1].textBn, normalizeSubtitleText('দ্বিতীয় অংশ'));
+});
+
+test('detectVoiceSegmentsFromSamples detects spoken voice intervals and ignores silence', () => {
+  const sampleRate = 1000;
+  // 5 seconds of audio: speech at 0.5s..2.0s and 2.8s..4.2s
+  const samples = new Float32Array(sampleRate * 5);
+  for (let i = 500; i < 2000; i++) {
+    samples[i] = Math.sin(i * 0.25) * 0.6;
+  }
+  for (let i = 2800; i < 4200; i++) {
+    samples[i] = Math.sin(i * 0.3) * 0.7;
+  }
+
+  const segments = detectVoiceSegmentsFromSamples(samples, sampleRate);
+  assert.equal(segments.length, 2);
+  assert.ok(Math.abs(segments[0].startTime - 0.5) <= 0.15);
+  assert.ok(Math.abs(segments[0].endTime - 2.0) <= 0.15);
+  assert.ok(Math.abs(segments[1].startTime - 2.8) <= 0.15);
+  assert.ok(Math.abs(segments[1].endTime - 4.2) <= 0.15);
+});
+
+test('encodeMonoWavPcm16 creates valid 44-byte RIFF WAVE header and PCM payload', () => {
+  const samples = new Float32Array([0, 0.5, -0.5, 1, -1]);
+  const wav = encodeMonoWavPcm16(samples, 16000);
+  assert.equal(wav.byteLength, 44 + samples.length * 2);
+  const header = String.fromCharCode(wav[0], wav[1], wav[2], wav[3]);
+  assert.equal(header, 'RIFF');
+  const format = String.fromCharCode(wav[8], wav[9], wav[10], wav[11]);
+  assert.equal(format, 'WAVE');
+  const peaks = computeWaveformPeaks(samples, 4);
+  assert.equal(peaks.length, 4);
 });

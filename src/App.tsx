@@ -4,12 +4,7 @@
  */
 
 import React, { useState, useMemo, useCallback } from 'react';
-import {
-  Download,
-  Sparkles,
-  CheckCircle2,
-  RotateCcw,
-} from 'lucide-react';
+import { Video, CheckCircle2 } from 'lucide-react';
 import {
   SubtitleCue,
   SubtitleStyleConfig,
@@ -24,11 +19,20 @@ import {
   SAMPLE_VIDEO_PROJECTS,
   SampleVideoProject,
 } from './utils/sampleProjects';
+import {
+  extractVoiceFromVideoFile,
+  DetectedVoiceSegment,
+} from './utils/voiceAudioEngine';
 import { VideoPreviewStage } from './components/VideoPreviewStage';
 import { SubtitleCueTable } from './components/SubtitleCueTable';
 import { TypographyAndSyncPanel } from './components/TypographyAndSyncPanel';
 import { ExportAndImportModal } from './components/ExportAndImportModal';
 import { AiAutoSubtitleModal } from './components/AiAutoSubtitleModal';
+import { VideoDownloadModal } from './components/VideoDownloadModal';
+
+const DEFAULT_WAVEFORM_PEAKS: number[] = Array.from({ length: 96 }, (_, i) =>
+  Number((0.2 + Math.abs(Math.sin(i * 0.35)) * 0.72).toFixed(2))
+);
 
 export default function App() {
   const [activeProject, setActiveProject] = useState<SampleVideoProject>(
@@ -49,15 +53,24 @@ export default function App() {
     SAMPLE_VIDEO_PROJECTS[0].cues[0]?.id || null
   );
 
-  // Custom uploaded video file URL
+  // Custom uploaded video file & original native dimensions
+  const [uploadedVideoFile, setUploadedVideoFile] = useState<File | null>(null);
   const [uploadedVideoUrl, setUploadedVideoUrl] = useState<string | null>(null);
   const [uploadedVideoName, setUploadedVideoName] = useState<string | null>(
     null
   );
+  const [nativeWidth, setNativeWidth] = useState<number>(1920);
+  const [nativeHeight, setNativeHeight] = useState<number>(1080);
+  const [waveformPeaks, setWaveformPeaks] = useState<number[]>(
+    DEFAULT_WAVEFORM_PEAKS
+  );
+  const [isExtractingVoice, setIsExtractingVoice] = useState<boolean>(false);
 
   // Modals & AI states
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [isAiModalOpen, setIsAiModalOpen] = useState(false);
+  const [isVideoDownloadModalOpen, setIsVideoDownloadModalOpen] =
+    useState(false);
   const [isGeneratingAi, setIsGeneratingAi] = useState(false);
   const [isTranslatingAi, setIsTranslatingAi] = useState(false);
   const [statusBanner, setStatusBanner] = useState<string | null>(null);
@@ -66,7 +79,7 @@ export default function App() {
     setStatusBanner(msg);
     window.setTimeout(() => {
       setStatusBanner((prev) => (prev === msg ? null : prev));
-    }, 3200);
+    }, 3800);
   }, []);
 
   const activeCue = useMemo(
@@ -82,27 +95,137 @@ export default function App() {
   // Switch between curated bilingual sample projects
   const handleSelectProject = useCallback((project: SampleVideoProject) => {
     setIsPlaying(false);
+    setUploadedVideoFile(null);
     setUploadedVideoUrl(null);
     setUploadedVideoName(null);
+    setNativeWidth(1920);
+    setNativeHeight(1080);
+    setWaveformPeaks(DEFAULT_WAVEFORM_PEAKS);
     setActiveProject(project);
     setCues(project.cues);
     setDuration(project.duration);
-    setCurrentTime(project.cues[0]?.startTime ? project.cues[0].startTime + 0.2 : 0.5);
+    setCurrentTime(
+      project.cues[0]?.startTime ? project.cues[0].startTime + 0.2 : 0.5
+    );
     setSelectedCueId(project.cues[0]?.id || null);
   }, []);
 
-  // Load user's custom video file from disk
-  const handleUploadVideoFile = useCallback(
-    (file: File) => {
-      const url = URL.createObjectURL(file);
-      setUploadedVideoUrl(url);
-      setUploadedVideoName(file.name);
-      setIsPlaying(false);
-      setCurrentTime(0.5);
-      showToast(`Loaded "${file.name}" — Ready for AI Auto-Subtitle or editing`);
+  // Transcribe extracted voice audio via /api/subtitles/generate
+  const runVoiceTranscription = useCallback(
+    async (params: {
+      mediaBase64?: string;
+      mimeType?: string;
+      dur: number;
+      title: string;
+      voiceSegments?: DetectedVoiceSegment[];
+    }) => {
+      setIsExtractingVoice(true);
+      setIsGeneratingAi(true);
+      try {
+        const response = await fetch('/api/subtitles/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            mediaBase64: params.mediaBase64,
+            mimeType: params.mimeType,
+            duration: params.dur,
+            videoTitle: params.title,
+            voiceSegments: params.voiceSegments || [],
+          }),
+        });
+        const data = await response.json();
+        if (response.ok && Array.isArray(data.cues) && data.cues.length > 0) {
+          setCues(data.cues);
+          setSelectedCueId(data.cues[0].id);
+          setCurrentTime(Number((data.cues[0].startTime + 0.05).toFixed(2)));
+          showToast(
+            `Auto-generated ${data.cues.length} বাংলা & English subtitles directly from video voice — Ready to edit!`
+          );
+        } else {
+          showToast(
+            data.error ||
+              'Video loaded — Edit subtitles below or use AI Auto-Subtitler'
+          );
+        }
+      } catch {
+        showToast(
+          'Video loaded — Edit subtitles below or click Auto-Detect Voice Cues'
+        );
+      } finally {
+        setIsExtractingVoice(false);
+        setIsGeneratingAi(false);
+      }
     },
     [showToast]
   );
+
+  // Load user's custom video file AND automatically extract voice -> auto-subtitle!
+  const handleUploadVideoFile = useCallback(
+    async (
+      file: File,
+      preExtractedVoice?: {
+        duration: number;
+        waveformPeaks: number[];
+        voiceSegments: DetectedVoiceSegment[];
+      }
+    ) => {
+      const url = URL.createObjectURL(file);
+      setUploadedVideoFile(file);
+      setUploadedVideoUrl(url);
+      setUploadedVideoName(file.name);
+      setIsPlaying(false);
+      setCurrentTime(0.2);
+
+      if (preExtractedVoice) {
+        setDuration(preExtractedVoice.duration);
+        setWaveformPeaks(preExtractedVoice.waveformPeaks);
+        return;
+      }
+
+      // Automatically extract spoken voice from uploaded video and generate subtitles
+      setIsExtractingVoice(true);
+      showToast(
+        `Extracting voice from "${file.name}" to auto-generate বাংলা & English subtitles...`
+      );
+      try {
+        const voiceData = await extractVoiceFromVideoFile(file);
+        setDuration(voiceData.duration);
+        setWaveformPeaks(voiceData.waveformPeaks);
+        await runVoiceTranscription({
+          mediaBase64: voiceData.wavBase64,
+          mimeType: voiceData.mimeType,
+          dur: voiceData.duration,
+          title: file.name.replace(/\.[^/.]+$/, ''),
+          voiceSegments: voiceData.voiceSegments,
+        });
+      } catch {
+        // Fallback: send video file to server so FFmpeg extracts voice
+        setIsExtractingVoice(false);
+        showToast(
+          `Loaded "${file.name}" — Click "Auto-Detect Voice Cues" to transcribe`
+        );
+      }
+    },
+    [runVoiceTranscription, showToast]
+  );
+
+  // Re-transcribe voice on demand
+  const handleRetranscribeVoice = useCallback(async () => {
+    if (uploadedVideoFile) {
+      await handleUploadVideoFile(uploadedVideoFile);
+    } else {
+      await runVoiceTranscription({
+        dur: duration,
+        title: activeProject.title,
+      });
+    }
+  }, [
+    uploadedVideoFile,
+    handleUploadVideoFile,
+    runVoiceTranscription,
+    duration,
+    activeProject.title,
+  ]);
 
   // Select a cue and optionally seek video to its start time
   const handleSelectCue = useCallback((cueId: string, seekTime?: number) => {
@@ -123,55 +246,51 @@ export default function App() {
   );
 
   // Add a new subtitle cue right after the specified cue (or at the end) with zero overlap
-  const handleAddCueAfter = useCallback(
-    (afterCueId?: string) => {
-      setCues((prev) => {
-        const idx = afterCueId
-          ? prev.findIndex((c) => c.id === afterCueId)
-          : prev.length - 1;
-        const insertIndex = idx === -1 ? prev.length : idx + 1;
-        const refCue = prev[insertIndex - 1];
+  const handleAddCueAfter = useCallback((afterCueId?: string) => {
+    setCues((prev) => {
+      const idx = afterCueId
+        ? prev.findIndex((c) => c.id === afterCueId)
+        : prev.length - 1;
+      const insertIndex = idx === -1 ? prev.length : idx + 1;
+      const refCue = prev[insertIndex - 1];
 
-        const newStart = refCue
-          ? Number((refCue.endTime + 0.1).toFixed(2))
-          : 0.0;
-        const newEnd = Number((newStart + 2.4).toFixed(2));
+      const newStart = refCue
+        ? Number((refCue.endTime + 0.1).toFixed(2))
+        : 0.0;
+      const newEnd = Number((newStart + 2.4).toFixed(2));
 
-        const newCue: SubtitleCue = {
-          id: `cue-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-          startTime: newStart,
-          endTime: newEnd,
-          textBn: normalizeSubtitleText('নতুন বাংলা সাবটাইটেল লাইন।'),
-          textEn: 'New English subtitle line.',
-          speaker: 'Speaker',
-          confidence: 1.0,
-        };
+      const newCue: SubtitleCue = {
+        id: `cue-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        startTime: newStart,
+        endTime: newEnd,
+        textBn: normalizeSubtitleText('নতুন বাংলা সাবটাইটেল লাইন।'),
+        textEn: 'New English subtitle line.',
+        speaker: 'Speaker',
+        confidence: 1.0,
+      };
 
-        const rawUpdated = [...prev];
-        rawUpdated.splice(insertIndex, 0, newCue);
+      const rawUpdated = [...prev];
+      rawUpdated.splice(insertIndex, 0, newCue);
 
-        // Shift any subsequent overlapping cues forward cleanly
-        for (let i = insertIndex + 1; i < rawUpdated.length; i++) {
-          const prevCue = rawUpdated[i - 1];
-          const currCue = rawUpdated[i];
-          if (currCue.startTime < prevCue.endTime + 0.1) {
-            const dur = Math.max(1.2, currCue.endTime - currCue.startTime);
-            const shiftedStart = Number((prevCue.endTime + 0.1).toFixed(2));
-            rawUpdated[i] = {
-              ...currCue,
-              startTime: shiftedStart,
-              endTime: Number((shiftedStart + dur).toFixed(2)),
-            };
-          }
+      for (let i = insertIndex + 1; i < rawUpdated.length; i++) {
+        const prevCue = rawUpdated[i - 1];
+        const currCue = rawUpdated[i];
+        if (currCue.startTime < prevCue.endTime + 0.1) {
+          const dur = Math.max(1.2, currCue.endTime - currCue.startTime);
+          const shiftedStart = Number((prevCue.endTime + 0.1).toFixed(2));
+          rawUpdated[i] = {
+            ...currCue,
+            startTime: shiftedStart,
+            endTime: Number((shiftedStart + dur).toFixed(2)),
+          };
         }
+      }
 
-        setSelectedCueId(newCue.id);
-        setCurrentTime(Number((newCue.startTime + 0.05).toFixed(2)));
-        return rawUpdated;
-      });
-    },
-    []
-  );
+      setSelectedCueId(newCue.id);
+      setCurrentTime(Number((newCue.startTime + 0.05).toFixed(2)));
+      return rawUpdated;
+    });
+  }, []);
 
   // Delete a cue
   const handleDeleteCue = useCallback((cueId: string) => {
@@ -227,7 +346,7 @@ export default function App() {
     <div className="min-h-screen lg:h-screen lg:overflow-hidden flex flex-col bg-[#0F172A] text-slate-100">
       {/* Strict 3-Zone Top Bar Contract */}
       <header className="flex items-center justify-between gap-8 px-6 py-3 bg-[#0B1120] border-b border-slate-800 shrink-0">
-        {/* Zone 1: Brand Title (Single text element wordmark) */}
+        {/* Zone 1: Brand Title */}
         <a
           href="#workspace"
           className="text-base font-bold tracking-tight text-white whitespace-nowrap shrink-0"
@@ -245,7 +364,7 @@ export default function App() {
             onClick={() => setIsAiModalOpen(true)}
             className="hover:text-white hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0"
           >
-            AI Auto-Subtitler
+            Voice Auto-Subtitler
           </button>
           <button
             type="button"
@@ -256,29 +375,29 @@ export default function App() {
           </button>
           <button
             type="button"
+            onClick={() => setIsExportModalOpen(true)}
+            className="hover:text-white hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0"
+          >
+            Export SRT / VTT
+          </button>
+          <button
+            type="button"
             onClick={() => handleSelectProject(SAMPLE_VIDEO_PROJECTS[0])}
             className="hover:text-white hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0"
           >
             Reset Sample
           </button>
-          <button
-            type="button"
-            onClick={() => setIsExportModalOpen(true)}
-            className="hover:text-white hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0"
-          >
-            Import SRT
-          </button>
         </nav>
 
-        {/* Zone 3: 1 Primary Action Button */}
+        {/* Zone 3: 1 Primary Action Button (Original Quality Video Download) */}
         <div className="flex items-center gap-3 shrink-0">
           <button
             type="button"
-            onClick={() => setIsExportModalOpen(true)}
+            onClick={() => setIsVideoDownloadModalOpen(true)}
             className="px-4 py-2 text-xs font-semibold text-slate-950 bg-amber-500 hover:bg-amber-400 rounded-lg transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5"
           >
-            <Download className="w-3.5 h-3.5" />
-            <span>Export Subtitles</span>
+            <Video className="w-3.5 h-3.5" />
+            <span>Download Video (Original Quality)</span>
           </button>
         </div>
       </header>
@@ -303,12 +422,11 @@ export default function App() {
         </div>
       )}
 
-      {/* Main Workstation Layout: Left Sidebar + Right Split Stage & Cue Editor */}
+      {/* Main Workstation Layout */}
       <main
         id="workspace"
         className="flex-1 flex flex-col lg:flex-row overflow-hidden"
       >
-        {/* Left Sidebar: Video Source, Language Mode, Standard Bangla Fonts & Sync Audit */}
         <TypographyAndSyncPanel
           activeProject={activeProject}
           uploadedVideoName={uploadedVideoName}
@@ -322,12 +440,15 @@ export default function App() {
           onOpenAiGenerator={() => setIsAiModalOpen(true)}
         />
 
-        {/* Right Workspace: 16:9 Broadcast Video Stage + High-Density Bilingual Cue Editor */}
         <div className="flex-1 flex flex-col min-w-0 overflow-y-auto">
           <VideoPreviewStage
             project={activeProject}
             uploadedVideoUrl={uploadedVideoUrl}
             uploadedVideoName={uploadedVideoName}
+            nativeWidth={nativeWidth}
+            nativeHeight={nativeHeight}
+            waveformPeaks={waveformPeaks}
+            isExtractingVoice={isExtractingVoice}
             cues={cues}
             currentTime={currentTime}
             duration={duration}
@@ -336,9 +457,15 @@ export default function App() {
             selectedCueId={selectedCueId}
             onTimeUpdate={setCurrentTime}
             onDurationChange={setDuration}
+            onNativeDimensionsChange={(w, h) => {
+              setNativeWidth(w);
+              setNativeHeight(h);
+            }}
             onPlayPauseToggle={() => setIsPlaying((p) => !p)}
             onSelectCue={handleSelectCue}
-            onUploadVideoFile={handleUploadVideoFile}
+            onUploadVideoFile={(f) => handleUploadVideoFile(f)}
+            onRetranscribeVoice={handleRetranscribeVoice}
+            onOpenVideoDownload={() => setIsVideoDownloadModalOpen(true)}
           />
 
           <SubtitleCueTable
@@ -361,7 +488,7 @@ export default function App() {
         </div>
       </main>
 
-      {/* Export / Import Modal */}
+      {/* Export / Import SRT & VTT Modal */}
       <ExportAndImportModal
         isOpen={isExportModalOpen}
         cues={cues}
@@ -383,13 +510,15 @@ export default function App() {
         }}
       />
 
-      {/* AI Auto-Subtitle Modal */}
+      {/* Voice-to-Subtitle AI Modal */}
       <AiAutoSubtitleModal
         isOpen={isAiModalOpen}
         currentDuration={duration}
         currentTitle={uploadedVideoName || activeProject.title}
         onClose={() => setIsAiModalOpen(false)}
-        onVideoFileSelected={handleUploadVideoFile}
+        onVideoFileSelected={(file, voiceData) =>
+          handleUploadVideoFile(file, voiceData)
+        }
         onSubtitlesGenerated={(generatedCues, newTitle) => {
           setIsGeneratingAi(false);
           setCues(generatedCues);
@@ -402,11 +531,27 @@ export default function App() {
             if (lastEnd > duration) setDuration(Math.ceil(lastEnd + 1));
           }
           showToast(
-            `Generated ${generatedCues.length} frame-synced বাংলা & English cues${
+            `Voice-aligned ${generatedCues.length} বাংলা & English subtitles placed on video${
               newTitle ? ` for "${newTitle}"` : ''
             }`
           );
         }}
+      />
+
+      {/* Original-Quality Subtitled Video Download Modal */}
+      <VideoDownloadModal
+        isOpen={isVideoDownloadModalOpen}
+        cues={cues}
+        styleConfig={styleConfig}
+        uploadedVideoFile={uploadedVideoFile}
+        nativeWidth={nativeWidth}
+        nativeHeight={nativeHeight}
+        duration={duration}
+        projectTitle={uploadedVideoName || activeProject.title}
+        onClose={() => setIsVideoDownloadModalOpen(false)}
+        onUpdateStyle={(patch) =>
+          setStyleConfig((prev) => ({ ...prev, ...patch }))
+        }
       />
     </div>
   );

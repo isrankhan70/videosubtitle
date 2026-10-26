@@ -9,6 +9,8 @@ import {
   Camera,
   Upload,
   Maximize2,
+  Mic,
+  Video,
 } from 'lucide-react';
 import {
   SubtitleCue,
@@ -23,6 +25,10 @@ interface VideoPreviewStageProps {
   project: SampleVideoProject;
   uploadedVideoUrl: string | null;
   uploadedVideoName: string | null;
+  nativeWidth: number;
+  nativeHeight: number;
+  waveformPeaks: number[];
+  isExtractingVoice: boolean;
   cues: SubtitleCue[];
   currentTime: number;
   duration: number;
@@ -31,15 +37,22 @@ interface VideoPreviewStageProps {
   selectedCueId: string | null;
   onTimeUpdate: (time: number) => void;
   onDurationChange: (duration: number) => void;
+  onNativeDimensionsChange: (width: number, height: number) => void;
   onPlayPauseToggle: () => void;
   onSelectCue: (cueId: string, seekTime?: number) => void;
   onUploadVideoFile: (file: File) => void;
+  onRetranscribeVoice: () => void;
+  onOpenVideoDownload: () => void;
 }
 
 export const VideoPreviewStage: React.FC<VideoPreviewStageProps> = ({
   project,
   uploadedVideoUrl,
   uploadedVideoName,
+  nativeWidth,
+  nativeHeight,
+  waveformPeaks,
+  isExtractingVoice,
   cues,
   currentTime,
   duration,
@@ -48,9 +61,12 @@ export const VideoPreviewStage: React.FC<VideoPreviewStageProps> = ({
   selectedCueId,
   onTimeUpdate,
   onDurationChange,
+  onNativeDimensionsChange,
   onPlayPauseToggle,
   onSelectCue,
   onUploadVideoFile,
+  onRetranscribeVoice,
+  onOpenVideoDownload,
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -60,13 +76,10 @@ export const VideoPreviewStage: React.FC<VideoPreviewStageProps> = ({
   const [isMuted, setIsMuted] = useState(false);
   const [snapshotSavedMsg, setSnapshotSavedMsg] = useState<string | null>(null);
 
-  // Refs for animation loop so we don't recreate timers or stall headless Chromium
   const currentTimeRef = useRef(currentTime);
   currentTimeRef.current = currentTime;
   const durationRef = useRef(duration);
   durationRef.current = duration;
-  const isPlayingRef = useRef(isPlaying);
-  isPlayingRef.current = isPlaying;
 
   const activeCue = findActiveCue(cues, currentTime);
 
@@ -83,15 +96,13 @@ export const VideoPreviewStage: React.FC<VideoPreviewStageProps> = ({
     const vid = videoRef.current;
     if (!vid || !uploadedVideoUrl) return;
     if (isPlaying) {
-      vid.play().catch(() => {
-        // Fallback if autoplay blocked
-      });
+      vid.play().catch(() => {});
     } else {
       vid.pause();
     }
   }, [isPlaying, uploadedVideoUrl]);
 
-  // Procedural timer when playing built-in sample project (no external video file)
+  // Procedural timer when playing built-in sample project
   useEffect(() => {
     if (uploadedVideoUrl || !isPlaying) return;
 
@@ -107,15 +118,19 @@ export const VideoPreviewStage: React.FC<VideoPreviewStageProps> = ({
       } else {
         onTimeUpdate(Number(nextTime.toFixed(3)));
       }
-    }, 50); // 20Hz lightweight clock update for smooth timecode & zero CPU spike
+    }, 50);
 
     return () => window.clearInterval(intervalId);
   }, [isPlaying, uploadedVideoUrl, onTimeUpdate]);
 
   // Render crisp broadcast scene onto canvas when using sample projects
   const drawSampleScene = useCallback(
-    (ctx: CanvasRenderingContext2D, width: number, height: number, time: number) => {
-      // Deep cinematic gradient backdrop based on project theme
+    (
+      ctx: CanvasRenderingContext2D,
+      width: number,
+      height: number,
+      time: number
+    ) => {
       const grad = ctx.createLinearGradient(0, 0, width, height);
       if (project.sceneType === 'documentary') {
         grad.addColorStop(0, '#042f2e');
@@ -133,7 +148,6 @@ export const VideoPreviewStage: React.FC<VideoPreviewStageProps> = ({
       ctx.fillStyle = grad;
       ctx.fillRect(0, 0, width, height);
 
-      // Subtle architectural grid lines
       ctx.strokeStyle = 'rgba(255, 255, 255, 0.04)';
       ctx.lineWidth = 1;
       const gridStep = 64;
@@ -151,7 +165,7 @@ export const VideoPreviewStage: React.FC<VideoPreviewStageProps> = ({
         ctx.stroke();
       }
 
-      // Dynamic acoustic wave visualization in center-top of frame
+      // Dynamic acoustic voice wave visualization in center-top of frame
       const centerY = height * 0.38;
       const barCount = 42;
       const totalBarWidth = width * 0.56;
@@ -175,21 +189,18 @@ export const VideoPreviewStage: React.FC<VideoPreviewStageProps> = ({
         ctx.fill();
       }
 
-      // Subtle broadcast frame guides (safe title area corners)
       const marginX = width * 0.05;
       const marginY = height * 0.06;
       const cornerLen = 18;
       ctx.strokeStyle = 'rgba(255, 255, 255, 0.18)';
       ctx.lineWidth = 1.5;
 
-      // Top-left corner
       ctx.beginPath();
       ctx.moveTo(marginX, marginY + cornerLen);
       ctx.lineTo(marginX, marginY);
       ctx.lineTo(marginX + cornerLen, marginY);
       ctx.stroke();
 
-      // Top-right corner
       ctx.beginPath();
       ctx.moveTo(width - marginX - cornerLen, marginY);
       ctx.lineTo(width - marginX, marginY);
@@ -199,7 +210,6 @@ export const VideoPreviewStage: React.FC<VideoPreviewStageProps> = ({
     [project, activeCue]
   );
 
-  // On-demand canvas redraw when currentTime, project, or activeCue updates
   useEffect(() => {
     if (uploadedVideoUrl) return;
     const canvas = canvasRef.current;
@@ -209,14 +219,14 @@ export const VideoPreviewStage: React.FC<VideoPreviewStageProps> = ({
     drawSampleScene(ctx, canvas.width, canvas.height, currentTime);
   }, [currentTime, project, uploadedVideoUrl, drawSampleScene]);
 
-  // Export high-res burned-in subtitle frame snapshot (.PNG)
+  // Export high-res burned-in subtitle frame snapshot (.PNG) at native resolution
   const handleExportFrameSnapshot = async () => {
     if (document.fonts && document.fonts.ready) {
       await document.fonts.ready;
     }
     const offscreen = document.createElement('canvas');
-    offscreen.width = 1280;
-    offscreen.height = 720;
+    offscreen.width = nativeWidth || 1920;
+    offscreen.height = nativeHeight || 1080;
     const ctx = offscreen.getContext('2d');
     if (!ctx) return;
 
@@ -226,7 +236,6 @@ export const VideoPreviewStage: React.FC<VideoPreviewStageProps> = ({
       drawSampleScene(ctx, offscreen.width, offscreen.height, currentTime);
     }
 
-    // Draw burned-in subtitle box onto snapshot
     if (activeCue) {
       const bnText = normalizeSubtitleText(activeCue.textBn);
       const enText = normalizeSubtitleText(activeCue.textEn);
@@ -247,10 +256,11 @@ export const VideoPreviewStage: React.FC<VideoPreviewStageProps> = ({
       }
 
       if (lines.length > 0) {
-        const basePx = Math.round(styleConfig.fontSize * 1.35);
+        const scale = offscreen.height / 540;
+        const basePx = Math.round(styleConfig.fontSize * scale);
         const lineHeight = basePx * 1.45;
-        const boxPaddingX = 28;
-        const boxPaddingY = 14;
+        const boxPaddingX = Math.round(24 * scale);
+        const boxPaddingY = Math.round(12 * scale);
         const totalTextHeight = lines.length * lineHeight;
         const bottomY =
           offscreen.height - (offscreen.height * styleConfig.bottomOffset) / 100;
@@ -258,11 +268,13 @@ export const VideoPreviewStage: React.FC<VideoPreviewStageProps> = ({
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
 
-        let maxWidth = 320;
+        let maxWidth = Math.round(240 * scale);
         lines.forEach((l) => {
           ctx.font = `${styleConfig.fontWeight} ${
             l.isBn ? basePx : Math.round(basePx * 0.86)
-          }px "${l.isBn ? styleConfig.banglaFont : styleConfig.englishFont}", sans-serif`;
+          }px "${
+            l.isBn ? styleConfig.banglaFont : styleConfig.englishFont
+          }", sans-serif`;
           const m = ctx.measureText(l.text);
           if (m.width > maxWidth) maxWidth = m.width;
         });
@@ -275,7 +287,7 @@ export const VideoPreviewStage: React.FC<VideoPreviewStageProps> = ({
         if (styleConfig.bgOpacity > 0) {
           ctx.fillStyle = `rgba(9, 13, 22, ${styleConfig.bgOpacity / 100})`;
           ctx.beginPath();
-          ctx.roundRect(boxX, boxY, boxW, boxH, 8);
+          ctx.roundRect(boxX, boxY, boxW, boxH, Math.round(8 * scale));
           ctx.fill();
         }
 
@@ -287,7 +299,7 @@ export const VideoPreviewStage: React.FC<VideoPreviewStageProps> = ({
           const ly = boxY + boxPaddingY + (idx + 0.5) * lineHeight;
           if (styleConfig.textOutline) {
             ctx.strokeStyle = 'rgba(0,0,0,0.9)';
-            ctx.lineWidth = 4;
+            ctx.lineWidth = Math.max(2, Math.round(3.5 * scale));
             ctx.strokeText(l.text, offscreen.width / 2, ly);
           }
           ctx.fillStyle = l.isBn ? styleConfig.bnColor : styleConfig.enColor;
@@ -299,12 +311,11 @@ export const VideoPreviewStage: React.FC<VideoPreviewStageProps> = ({
     const dataUrl = offscreen.toDataURL('image/png');
     const a = document.createElement('a');
     a.href = dataUrl;
-    a.download = `vanisub-frame-${formatTimestampDisplay(currentTime).replace(
-      /[:.]/g,
-      '-'
-    )}.png`;
+    a.download = `vanisub-frame-${offscreen.width}x${
+      offscreen.height
+    }-${formatTimestampDisplay(currentTime).replace(/[:.]/g, '-')}.png`;
     a.click();
-    setSnapshotSavedMsg('Frame PNG exported');
+    setSnapshotSavedMsg(`Saved ${offscreen.width}×${offscreen.height} PNG`);
     window.setTimeout(() => setSnapshotSavedMsg(null), 2500);
   };
 
@@ -325,11 +336,13 @@ export const VideoPreviewStage: React.FC<VideoPreviewStageProps> = ({
     }
     const targetCue = cues[targetIndex];
     if (targetCue) {
-      onSelectCue(targetCue.id, Number((targetCue.startTime + 0.05).toFixed(3)));
+      onSelectCue(
+        targetCue.id,
+        Number((targetCue.startTime + 0.05).toFixed(3))
+      );
     }
   };
 
-  // Compute formatted lines for live DOM overlay
   const renderOverlayContent = () => {
     if (!activeCue) return null;
     const bn = normalizeSubtitleText(activeCue.textBn);
@@ -413,10 +426,10 @@ export const VideoPreviewStage: React.FC<VideoPreviewStageProps> = ({
       className="flex flex-col bg-[#0B1120] border-b border-slate-800"
     >
       {/* 16:9 Broadcast Video Canvas Container */}
-      <div className="relative w-full bg-[#060911] flex items-center justify-center px-4 py-3">
+      <div className="relative w-full bg-[#060911] flex items-center justify-center px-4 py-2.5">
         <div
           ref={stageContainerRef}
-          className="relative w-full max-w-[780px] aspect-video bg-slate-950 rounded-lg overflow-hidden border border-slate-800/90 shadow-sm"
+          className="relative w-full max-w-[760px] aspect-video bg-slate-950 rounded-lg overflow-hidden border border-slate-800/90 shadow-sm"
         >
           {uploadedVideoUrl ? (
             <video
@@ -428,13 +441,12 @@ export const VideoPreviewStage: React.FC<VideoPreviewStageProps> = ({
                 onTimeUpdate(Number(e.currentTarget.currentTime.toFixed(3)))
               }
               onLoadedMetadata={(e) => {
-                if (
-                  e.currentTarget.duration &&
-                  Number.isFinite(e.currentTarget.duration)
-                ) {
-                  onDurationChange(
-                    Number(e.currentTarget.duration.toFixed(2))
-                  );
+                const v = e.currentTarget;
+                if (v.duration && Number.isFinite(v.duration)) {
+                  onDurationChange(Number(v.duration.toFixed(2)));
+                }
+                if (v.videoWidth && v.videoHeight) {
+                  onNativeDimensionsChange(v.videoWidth, v.videoHeight);
                 }
               }}
               onClick={onPlayPauseToggle}
@@ -451,7 +463,7 @@ export const VideoPreviewStage: React.FC<VideoPreviewStageProps> = ({
             />
           )}
 
-          {/* Top-left project title overlay (uses full browser Bangla shaping & webfont) */}
+          {/* Top-left project title overlay */}
           {!uploadedVideoUrl && (
             <div className="absolute top-3 left-3 pointer-events-none">
               <div className="text-[11px] font-semibold tracking-wider text-slate-200/85 uppercase">
@@ -466,13 +478,28 @@ export const VideoPreviewStage: React.FC<VideoPreviewStageProps> = ({
             </div>
           )}
 
+          {/* Voice Extraction Overlay when processing uploaded video audio */}
+          {isExtractingVoice && (
+            <div className="absolute inset-0 bg-slate-950/75 backdrop-blur-xs flex flex-col items-center justify-center gap-2 z-30">
+              <Mic className="w-7 h-7 text-amber-400 animate-bounce" />
+              <p className="text-xs font-semibold text-white">
+                Extracting Video Voice &amp; Generating বাংলা / English Subtitles...
+              </p>
+              <p className="text-[11px] text-slate-300">
+                16kHz PCM Voice Activity Detection + Gemini Audio Transcription
+              </p>
+            </div>
+          )}
+
           {/* Top-right quiet metadata overlay */}
           <div className="absolute top-3 right-3 flex items-center gap-2 text-xs text-slate-300 bg-slate-950/75 px-2.5 py-1 rounded border border-slate-800/80 pointer-events-none font-mono-tabular">
-            <span>{uploadedVideoName ? 'Custom Video' : project.resolution}</span>
+            <span>
+              {nativeWidth}×{nativeHeight} Original
+            </span>
             <span aria-hidden="true">·</span>
             <span>{styleConfig.banglaFont}</span>
             <span aria-hidden="true">·</span>
-            <span>NFC Verified</span>
+            <span>Voice Synced</span>
           </div>
 
           {/* Live Synchronized Bangla & English Subtitle Overlay */}
@@ -480,11 +507,25 @@ export const VideoPreviewStage: React.FC<VideoPreviewStageProps> = ({
         </div>
       </div>
 
-      {/* Transport Bar & Interactive Timeline Cue Scrubber */}
-      <div className="px-4 py-2.5 bg-[#0F172A] border-t border-slate-800/80 flex flex-col gap-2">
-        {/* Interactive Timeline Track with Visual Cue Blocks */}
+      {/* Transport Bar & Voice Waveform Timeline Cue Scrubber */}
+      <div className="px-4 py-2 bg-[#0F172A] border-t border-slate-800/80 flex flex-col gap-2">
+        {/* Interactive Timeline Track with Acoustic Voice Waveform + Cue Blocks */}
         <div className="flex flex-col gap-1">
-          <div className="relative h-7 bg-slate-900 rounded border border-slate-800 overflow-hidden select-none">
+          <div className="relative h-8 bg-slate-900 rounded border border-slate-800 overflow-hidden select-none">
+            {/* Background Acoustic Voice Waveform Bars */}
+            <div
+              aria-hidden="true"
+              className="absolute inset-0 flex items-end justify-between px-1 py-0.5 opacity-25 pointer-events-none"
+            >
+              {waveformPeaks.map((peak, i) => (
+                <div
+                  key={i}
+                  style={{ height: `${Math.round(peak * 100)}%` }}
+                  className="w-[1px] bg-emerald-400 rounded-full"
+                />
+              ))}
+            </div>
+
             {/* Render each subtitle cue segment on timeline */}
             {cues.map((cue, idx) => {
               const safeDuration = Math.max(1, duration);
@@ -507,7 +548,10 @@ export const VideoPreviewStage: React.FC<VideoPreviewStageProps> = ({
                   key={cue.id}
                   type="button"
                   onClick={() =>
-                    onSelectCue(cue.id, Number((cue.startTime + 0.05).toFixed(3)))
+                    onSelectCue(
+                      cue.id,
+                      Number((cue.startTime + 0.05).toFixed(3))
+                    )
                   }
                   title={`#${idx + 1}: ${cue.textBn || cue.textEn}`}
                   aria-label={`Jump to cue ${idx + 1} at ${formatTimestampDisplay(
@@ -519,10 +563,10 @@ export const VideoPreviewStage: React.FC<VideoPreviewStageProps> = ({
                   }}
                   className={`absolute top-1 bottom-1 rounded-sm transition-colors text-[10px] font-mono-tabular px-1 truncate text-left ${
                     isCurrent
-                      ? 'bg-amber-500/85 text-slate-950 font-semibold z-10'
+                      ? 'bg-amber-500/90 text-slate-950 font-semibold z-10'
                       : isSelected
                       ? 'bg-amber-500/45 text-amber-100 border border-amber-400/70'
-                      : 'bg-slate-700/75 text-slate-300 hover:bg-slate-600/85'
+                      : 'bg-slate-700/80 text-slate-200 hover:bg-slate-600/90'
                   }`}
                 >
                   #{idx + 1}
@@ -554,14 +598,14 @@ export const VideoPreviewStage: React.FC<VideoPreviewStageProps> = ({
               max={Math.max(1, duration)}
               step={0.05}
               value={Math.min(currentTime, Math.max(1, duration))}
-              onChange={(e) => onTimeUpdate( parseFloat(e.target.value) )}
+              onChange={(e) => onTimeUpdate(parseFloat(e.target.value))}
               className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-amber-500"
             />
           </div>
         </div>
 
         {/* Transport Controls Row */}
-        <div className="flex items-center justify-between gap-4 flex-wrap">
+        <div className="flex items-center justify-between gap-3 flex-wrap">
           <div className="flex items-center gap-2">
             <button
               type="button"
@@ -617,7 +661,7 @@ export const VideoPreviewStage: React.FC<VideoPreviewStageProps> = ({
 
             <div
               data-testid="transport-timecode"
-              className="ml-2 text-xs font-mono-tabular text-slate-300"
+              className="ml-1 text-xs font-mono-tabular text-slate-300"
             >
               <span className="text-amber-400 font-medium">
                 {formatTimestampDisplay(currentTime)}
@@ -627,7 +671,7 @@ export const VideoPreviewStage: React.FC<VideoPreviewStageProps> = ({
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             {snapshotSavedMsg && (
               <span className="text-xs text-emerald-400 font-medium">
                 {snapshotSavedMsg}
@@ -648,19 +692,39 @@ export const VideoPreviewStage: React.FC<VideoPreviewStageProps> = ({
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-md transition-colors whitespace-nowrap shrink-0"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-500 rounded-md transition-colors whitespace-nowrap shrink-0"
             >
               <Upload className="w-3.5 h-3.5" />
-              <span>Load Video File</span>
+              <span>Upload Video (Auto Voice-to-Subtitle)</span>
+            </button>
+
+            <button
+              type="button"
+              disabled={isExtractingVoice}
+              onClick={onRetranscribeVoice}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-200 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 border border-slate-700 rounded-md transition-colors whitespace-nowrap shrink-0"
+            >
+              <Mic className="w-3.5 h-3.5 text-amber-400" />
+              <span>Auto-Detect Voice Cues</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={onOpenVideoDownload}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-amber-300 bg-slate-800 hover:bg-slate-700 border border-amber-500/40 rounded-md transition-colors whitespace-nowrap shrink-0"
+            >
+              <Video className="w-3.5 h-3.5" />
+              <span>Download Video ({nativeWidth}×{nativeHeight})</span>
             </button>
 
             <button
               type="button"
               onClick={handleExportFrameSnapshot}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-md transition-colors whitespace-nowrap shrink-0"
+              aria-label="Save Burned Frame PNG"
+              className="p-1.5 text-slate-300 hover:text-white hover:bg-slate-800 rounded border border-slate-700/80 transition-colors"
+              title="Save Native Resolution Frame PNG"
             >
-              <Camera className="w-3.5 h-3.5" />
-              <span>Save Burned Frame</span>
+              <Camera className="w-4 h-4" />
             </button>
 
             <button

@@ -2,19 +2,31 @@ import React, { useState, useRef } from 'react';
 import {
   X,
   Upload,
-  Sparkles,
+  Mic,
   FileVideo,
   AlertCircle,
   CheckCircle2,
+  AudioWaveform,
 } from 'lucide-react';
 import { SubtitleCue } from '../utils/subtitleEngine';
+import {
+  extractVoiceFromVideoFile,
+  DetectedVoiceSegment,
+} from '../utils/voiceAudioEngine';
 
 interface AiAutoSubtitleModalProps {
   isOpen: boolean;
   currentDuration: number;
   currentTitle: string;
   onClose: () => void;
-  onVideoFileSelected: (file: File) => void;
+  onVideoFileSelected: (
+    file: File,
+    voiceData?: {
+      duration: number;
+      waveformPeaks: number[];
+      voiceSegments: DetectedVoiceSegment[];
+    }
+  ) => void;
   onSubtitlesGenerated: (cues: SubtitleCue[], title?: string) => void;
 }
 
@@ -32,6 +44,13 @@ export const AiAutoSubtitleModal: React.FC<AiAutoSubtitleModalProps> = ({
   const [detectedDuration, setDetectedDuration] = useState<number>(
     currentDuration || 24
   );
+  const [extractedWavBase64, setExtractedWavBase64] = useState<string | null>(
+    null
+  );
+  const [voiceSegments, setVoiceSegments] = useState<DetectedVoiceSegment[]>(
+    []
+  );
+  const [statusStep, setStatusStep] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -39,25 +58,33 @@ export const AiAutoSubtitleModal: React.FC<AiAutoSubtitleModalProps> = ({
 
   if (!isOpen) return null;
 
-  const handleFileChange = (file: File) => {
+  const handleFileChange = async (file: File) => {
     setSelectedFile(file);
-    setVideoTitle(file.name.replace(/\.[^/.]+$/, ''));
+    const cleanName = file.name.replace(/\.[^/.]+$/, '');
+    setVideoTitle(cleanName);
     setErrorMsg(null);
-    onVideoFileSelected(file);
+    setStatusStep('Extracting 16kHz voice audio & detecting speech segments...');
 
-    // Probe duration with temporary HTMLMediaElement
-    const tempUrl = URL.createObjectURL(file);
-    const media = document.createElement(
-      file.type.startsWith('audio/') ? 'audio' : 'video'
-    );
-    media.preload = 'metadata';
-    media.src = tempUrl;
-    media.onloadedmetadata = () => {
-      if (media.duration && Number.isFinite(media.duration)) {
-        setDetectedDuration(Math.min(180, Math.max(8, Math.round(media.duration))));
-      }
-      URL.revokeObjectURL(tempUrl);
-    };
+    try {
+      const voiceResult = await extractVoiceFromVideoFile(file);
+      setDetectedDuration(voiceResult.duration);
+      setExtractedWavBase64(voiceResult.wavBase64);
+      setVoiceSegments(voiceResult.voiceSegments);
+      setStatusStep(
+        `Extracted voice track (${voiceResult.duration}s) · ${voiceResult.voiceSegments.length} spoken segments detected`
+      );
+      onVideoFileSelected(file, {
+        duration: voiceResult.duration,
+        waveformPeaks: voiceResult.waveformPeaks,
+        voiceSegments: voiceResult.voiceSegments,
+      });
+    } catch {
+      // Fallback if video has no browser-decodable audio track: server FFmpeg will extract audio
+      setStatusStep(
+        'Video loaded — Server FFmpeg will extract voice audio during transcription'
+      );
+      onVideoFileSelected(file);
+    }
   };
 
   const fileToBase64 = (file: File): Promise<string> => {
@@ -84,14 +111,21 @@ export const AiAutoSubtitleModal: React.FC<AiAutoSubtitleModalProps> = ({
     setErrorMsg(null);
 
     try {
-      let mediaBase64: string | undefined;
-      let mimeType: string | undefined;
+      let mediaBase64: string | undefined = extractedWavBase64 || undefined;
+      let mimeType: string | undefined = extractedWavBase64
+        ? 'audio/wav'
+        : undefined;
 
-      // Send inline media if file is under 18MB
-      if (selectedFile && selectedFile.size <= 18 * 1024 * 1024) {
+      // If browser WebAudio didn't extract WAV, send video file for server-side FFmpeg voice extraction
+      if (!mediaBase64 && selectedFile && selectedFile.size <= 65 * 1024 * 1024) {
+        setStatusStep('Uploading video for server FFmpeg voice extraction...');
         mediaBase64 = await fileToBase64(selectedFile);
         mimeType = selectedFile.type || 'video/mp4';
       }
+
+      setStatusStep(
+        'Transcribing spoken voice into বাংলা & English subtitles with Gemini AI...'
+      );
 
       const response = await fetch('/api/subtitles/generate', {
         method: 'POST',
@@ -100,15 +134,16 @@ export const AiAutoSubtitleModal: React.FC<AiAutoSubtitleModalProps> = ({
           mediaBase64,
           mimeType,
           duration: detectedDuration,
-          videoTitle: videoTitle.trim() || 'Untitled Video',
+          videoTitle: videoTitle.trim() || 'Uploaded Video',
           spokenHints: spokenHints.trim(),
+          voiceSegments,
         }),
       });
 
       const data = await response.json();
       if (!response.ok || !Array.isArray(data.cues)) {
         throw new Error(
-          data.error || 'Failed to generate bilingual subtitles.'
+          data.error || 'Failed to generate voice-aligned subtitles.'
         );
       }
 
@@ -116,7 +151,7 @@ export const AiAutoSubtitleModal: React.FC<AiAutoSubtitleModalProps> = ({
       onClose();
     } catch (err: any) {
       setErrorMsg(
-        err?.message || 'Error communicating with AI subtitle server.'
+        err?.message || 'Error communicating with AI voice transcription server.'
       );
     } finally {
       setIsProcessing(false);
@@ -133,9 +168,9 @@ export const AiAutoSubtitleModal: React.FC<AiAutoSubtitleModalProps> = ({
       <div className="w-full max-w-lg bg-[#0F172A] border border-slate-800 rounded-xl shadow-xl overflow-hidden">
         <div className="px-5 py-3.5 border-b border-slate-800 flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <Sparkles className="w-4 h-4 text-amber-400" />
+            <Mic className="w-4 h-4 text-amber-400" />
             <h2 id="ai-modal-title" className="text-sm font-semibold text-white">
-              AI Auto-Subtitle Generator (বাংলা + English)
+              Video Voice-to-Subtitle Generator (বাংলা + English)
             </h2>
           </div>
           <button
@@ -172,31 +207,39 @@ export const AiAutoSubtitleModal: React.FC<AiAutoSubtitleModalProps> = ({
                   <span className="text-xs font-semibold text-white">
                     {selectedFile.name}
                   </span>
-                  <span className="text-[11px] text-slate-400 font-mono-tabular">
+                  <span className="text-[11px] text-emerald-300 font-mono-tabular">
                     {(selectedFile.size / (1024 * 1024)).toFixed(2)} MB ·{' '}
-                    {detectedDuration}s detected
+                    {detectedDuration}s · {voiceSegments.length} Voice Segments
                   </span>
                 </>
               ) : (
                 <>
                   <FileVideo className="w-6 h-6 text-amber-400" />
                   <span className="text-xs font-semibold text-slate-200">
-                    Click to select Video or Audio File (.MP4, .WEBM, .MP3, .WAV)
+                    Select Video File (.MP4, .MOV, .WEBM) to Extract Voice
                   </span>
                   <span className="text-[11px] text-slate-400">
-                    Transcribes audio &amp; aligns both বাংলা and English tracks
+                    Extracts 16kHz voice audio &amp; auto-aligns বাংলা + English
+                    subtitles to spoken voice
                   </span>
                 </>
               )}
             </button>
           </div>
 
+          {statusStep && (
+            <div className="px-3 py-2 rounded bg-slate-900 border border-slate-800 text-xs text-amber-300 flex items-center gap-2">
+              <AudioWaveform className="w-4 h-4 shrink-0 text-emerald-400" />
+              <span>{statusStep}</span>
+            </div>
+          )}
+
           <div>
             <label
               htmlFor="ai-video-title"
               className="block text-xs font-medium text-slate-300 mb-1"
             >
-              Video Title or Topic
+              Video Title or Topic Context
             </label>
             <input
               id="ai-video-title"
@@ -204,7 +247,7 @@ export const AiAutoSubtitleModal: React.FC<AiAutoSubtitleModalProps> = ({
               required
               value={videoTitle}
               onChange={(e) => setVideoTitle(e.target.value)}
-              placeholder="e.g., পদ্মা সেতুর ডকুমেন্টারি / Padma Bridge Documentary"
+              placeholder="e.g., সুন্দরবন ডকুমেন্টারি / Tech Review"
               className="w-full px-3 py-2 text-xs bg-slate-900 border border-slate-700 rounded-md text-white focus:outline-none focus:border-amber-500"
             />
           </div>
@@ -214,14 +257,14 @@ export const AiAutoSubtitleModal: React.FC<AiAutoSubtitleModalProps> = ({
               htmlFor="ai-spoken-hints"
               className="block text-xs font-medium text-slate-300 mb-1"
             >
-              Spoken Script / Context Notes (Optional — helps exact proper nouns)
+              Speaker Terms / Proper Nouns (Optional — improves specific names)
             </label>
             <textarea
               id="ai-spoken-hints"
-              rows={3}
+              rows={2}
               value={spokenHints}
               onChange={(e) => setSpokenHints(e.target.value)}
-              placeholder="Paste raw spoken script, names, or topic details in Bangla or English..."
+              placeholder="Optional names, technical terms, or script hints in বাংলা or English..."
               className="w-full px-3 py-2 text-xs bg-slate-900 border border-slate-700 rounded-md text-white focus:outline-none focus:border-amber-500 bangla-text-render"
             />
           </div>
@@ -249,8 +292,8 @@ export const AiAutoSubtitleModal: React.FC<AiAutoSubtitleModalProps> = ({
               <Upload className="w-3.5 h-3.5" />
               <span>
                 {isProcessing
-                  ? 'Generating Frame-Synced Subtitles...'
-                  : 'Generate Bilingual Subtitles'}
+                  ? 'Transcribing Video Voice...'
+                  : 'Auto-Generate Subtitles from Voice'}
               </span>
             </button>
           </div>
